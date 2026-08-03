@@ -1,0 +1,15 @@
+build/bin
+build/dist
+build/deb
+node_modules
+frontend/dist
+frontend/dist_bak
+frontend/node_modules
+frontend/Ctempnpm-cache
+frontend/package.json.md5
+frontend/tsconfig.tsbuildinfo
+*.exe
+*.old
+*.tmp
+.hermes
+wails_tools.nsh

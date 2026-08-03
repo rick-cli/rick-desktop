@@ -1,0 +1,2 @@
+{"type":"event","request_id":"req-1","run_id":"run-1","session_id":"session-1","event":"FutureEvent","sequence":9,"data":{"preserved":true}}
+{"type":"error","request_id":"req-1","run_id":"run-1","session_id":"session-1","error":"fixture error"}

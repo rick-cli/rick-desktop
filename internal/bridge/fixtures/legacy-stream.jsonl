@@ -1,0 +1,3 @@
+{"type":"event","session_id":"session-1","event":"Content","data":{"text":"Hello"}}
+{"type":"event","session_id":"session-1","event":"Content","data":{"text":" world"}}
+{"type":"done","session_id":"session-1"}
