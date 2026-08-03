@@ -28,7 +28,7 @@ jobs:
       - name: Resolve latest rick release
         id: rickver
         run: |
-          RICK_VERSION="$(curl -fsSL https://api.github.com/repos/rick-cli/rick/releases/latest | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')"
+          RICK_VERSION="$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/rick-cli/rick/releases/latest | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')"
           echo "version=$RICK_VERSION" >> "$GITHUB_OUTPUT"
       - name: Check out rick source
         run: git clone --depth 1 --branch "${{ steps.rickver.outputs.version }}" https://github.com/rick-cli/rick.git rick-src
@@ -151,7 +151,7 @@ jobs:
       - name: Install wails build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev build-essential
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev build-essential
       - name: Install wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
       - name: Set release version
