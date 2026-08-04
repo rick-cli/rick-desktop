@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pencil, Plug, Plus, Puzzle, RefreshCw, Trash2 } from 'lucide-react';
-import { getMCPStatus, getResolvedConfig, requestPlugins, updateRickConfig } from '../lib/wails';
+import { getMCPStatus, getResolvedConfig, getTools, requestPlugins, updateRickConfig } from '../lib/wails';
+import { ToolInfo } from '../lib/types';
 import { useNotifications } from './Notifications';
 import { Overlay } from './Overlay';
 
@@ -25,9 +26,9 @@ interface RegistryPlugin {
   source?: string;
 }
 
-// Canonical built-in tools Rick ships (per docs/rick-cli-desktop-gaps.md).
-// Tools absent from the config map use their default (enabled) state.
-const BUILTIN_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'glob', 'list', 'apply_patch', 'todo', 'code_symbols', 'git', 'diagnostics', 'test', 'tree', 'fetch', 'memory', 'websearch'];
+// Fallback inventory only used when rickserve is too old to answer a tools
+// query. The live registry from getTools() is authoritative.
+const FALLBACK_TOOL_NAMES = ['read', 'write', 'edit', 'bash', 'grep', 'glob', 'list', 'apply_patch', 'todoread', 'todowrite', 'code_symbols', 'git', 'diagnostics', 'test', 'tree', 'fetch', 'memory', 'websearch', 'goalwrite', 'goalread', 'goalstep', 'goalabort', 'task', 'parallel_tasks', 'chat', 'steer', 'report'];
 
 function Card({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return <section className="glass-card rounded-lg p-4"><h2 className="text-xs font-medium text-foreground">{title}</h2>{description && <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{description}</p>}<div className="mt-3">{children}</div></section>;
@@ -40,6 +41,7 @@ function ToggleRow({ checked, onChange, label }: { checked: boolean; onChange: (
 export function ToolsMCPPanel({ setStatus }: { setStatus: (value: string) => void }) {
   const [mcp, setMcp] = useState<Record<string, MCPServer>>({});
   const [tools, setTools] = useState<Record<string, boolean>>({});
+  const [builtinTools, setBuiltinTools] = useState<ToolInfo[]>([]);
   const [pluginList, setPluginList] = useState<string[]>([]);
   const [registry, setRegistry] = useState<RegistryPlugin[]>([]);
   const [mcpStatus, setMcpStatus] = useState<Record<string, any>[]>([]);
@@ -47,14 +49,16 @@ export function ToolsMCPPanel({ setStatus }: { setStatus: (value: string) => voi
   const { confirm, toast } = useNotifications();
 
   const reload = useCallback(async () => {
-    const [resolvedValue, mcpValue, pluginsValue] = await Promise.all([
+    const [resolvedValue, mcpValue, pluginsValue, toolsValue] = await Promise.all([
       getResolvedConfig(),
       getMCPStatus().catch(() => []),
       requestPlugins('list').catch(() => null),
+      getTools().catch(() => []),
     ]);
     const config = (resolvedValue?.config || {}) as Record<string, any>;
     setMcp((config.mcp as Record<string, MCPServer>) || {});
     setTools((config.tools as Record<string, boolean>) || {});
+    setBuiltinTools(toolsValue);
     setPluginList((config.plugin as string[]) || []);
     setMcpStatus(mcpValue);
     const list = (pluginsValue as { plugins?: unknown } | null)?.plugins ?? pluginsValue;
@@ -128,7 +132,7 @@ export function ToolsMCPPanel({ setStatus }: { setStatus: (value: string) => voi
     if (nextEnabled) {
       if (name in tools) {
         const next = { ...tools };
-        if (BUILTIN_TOOLS.includes(name)) delete next[name]; // restore the built-in default
+        if (builtinTools.some(tool => tool.name === name)) delete next[name]; // restore the built-in default
         else next[name] = true;
         setToolMap(next, 'Tool enabled');
       }
@@ -195,7 +199,7 @@ export function ToolsMCPPanel({ setStatus }: { setStatus: (value: string) => voi
   return <div className="space-y-3">
     <PluginsCard pluginList={pluginList} registry={registry} busy={busy} onToggle={togglePlugin} onRemove={removePlugin} onRename={renamePlugin} onAddSource={addPluginSource} onAddName={addPluginName} />
     <MCPServersCard mcp={mcp} mcpLive={mcpLive} busy={busy} onToggle={toggleServer} onRemove={removeServer} onAdd={addServer} onSave={setServer} />
-    <ToolsCard tools={tools} busy={busy} onToggle={toggleTool} onRemove={removeTool} onAdd={addTool} onRename={renameTool} />
+    <ToolsCard tools={tools} builtin={builtinTools.length ? builtinTools : FALLBACK_TOOL_NAMES.map(name => ({ name }))} busy={busy} onToggle={toggleTool} onRemove={removeTool} onAdd={addTool} onRename={renameTool} />
     <Card title="Live MCP status" description="Connection state reported by the running rickserve process.">
       {mcpStatus.length === 0 ? <p className="py-2 text-[11px] text-muted-foreground">No MCP servers reported by the daemon.</p> : <div className="space-y-1.5">{mcpStatus.map(entry => <div key={String(entry.name)} className="flex items-center justify-between gap-3 rounded-lg border border-border px-2.5 py-2 text-xs"><span className="text-foreground">{String(entry.name)}</span><span className="text-[10px] text-muted-foreground">{String(entry.status)}</span></div>)}</div>}
       <button type="button" onClick={() => reload().catch(error => notifyError(error, 'Refresh failed'))} className={`${actionButton} mt-3`}><RefreshCw size={10} className="mr-1 inline" />Refresh</button>
@@ -371,8 +375,9 @@ function MCPServerEditor({ name, server, busy, onSave, onCancel }: {
 
 // ---------- Built-in tools ----------
 
-function ToolsCard({ tools, busy, onToggle, onRemove, onAdd, onRename }: {
+function ToolsCard({ tools, builtin, busy, onToggle, onRemove, onAdd, onRename }: {
   tools: Record<string, boolean>;
+  builtin: ToolInfo[];
   busy: boolean;
   onToggle: (name: string) => void;
   onRemove: (name: string) => void;
@@ -390,12 +395,13 @@ function ToolsCard({ tools, busy, onToggle, onRemove, onAdd, onRename }: {
   };
 
   const overrideNames = new Set(Object.keys(tools));
+  const builtinNames = new Set(builtin.map(tool => tool.name));
   const rows = [
-    ...BUILTIN_TOOLS.map(toolName => ({ name: toolName, enabled: tools[toolName] ?? true, override: overrideNames.has(toolName) })),
-    ...Object.keys(tools).filter(toolName => !BUILTIN_TOOLS.includes(toolName)).map(toolName => ({ name: toolName, enabled: tools[toolName] ?? true, override: true })),
+    ...builtin.map(tool => ({ name: tool.name, description: tool.description, enabled: tools[tool.name] ?? true, override: overrideNames.has(tool.name) })),
+    ...Object.keys(tools).filter(toolName => !builtinNames.has(toolName)).map(toolName => ({ name: toolName, description: undefined, enabled: tools[toolName] ?? true, override: true })),
   ];
 
-  return <Card title="Built-in tools" description="Every tool Rick ships is listed with its current state. Toggling one off writes an override into rick.json's tools map; removing an override restores the default.">
+  return <Card title="Built-in tools" description="The inventory below is reported live by rickserve, so it always matches the exact tool set the agent loop exposes. Toggling one off writes an override into rick.json's tools map; removing an override restores the default.">
     <div className="space-y-1.5">
       {rows.map(tool => (
         <div key={tool.name} className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 px-3 py-2.5">
@@ -409,6 +415,7 @@ function ToolsCard({ tools, busy, onToggle, onRemove, onAdd, onRename }: {
                     ? <span className="rounded border border-primary/25 px-1 text-[9px] text-primary">override</span>
                     : <span className="rounded border border-border px-1 text-[9px] text-muted-foreground">default</span>}
                 </span>
+                {tool.description && <span className="mt-0.5 block truncate text-[9px] text-muted-foreground" title={tool.description}>{tool.description}</span>}
               </span>}
           <ToggleRow checked={tool.enabled} onChange={() => onToggle(tool.name)} label="on" />
           <button type="button" disabled={busy} onClick={() => { setEditing(tool.name); setEditText(tool.name); }} className={actionButton}><Pencil size={10} className="mr-1 inline" />Edit</button>

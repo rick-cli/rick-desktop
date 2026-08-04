@@ -6,6 +6,7 @@ import { Session } from '../lib/types';
 interface SidebarProps {
   sessions: Session[];
   selectedSession: Session | null;
+  runningSessions: Record<string, boolean>;
   contextFiles: string[];
   workspacePath?: string;
   onPickFolder: () => void;
@@ -27,7 +28,7 @@ function categoryKey(session: Session): string {
   return session.category || 'Older';
 }
 
-export function Sidebar({ sessions, selectedSession, contextFiles, workspacePath, onPickFolder, onSelectSession, onNewChat, onOpenSettings, onRenameSession, onSetCategory, onSetFavorite, onDeleteSession, onForkSession, onExportSession }: SidebarProps) {
+export function Sidebar({ sessions, selectedSession, runningSessions, contextFiles, workspacePath, onPickFolder, onSelectSession, onNewChat, onOpenSettings, onRenameSession, onSetCategory, onSetFavorite, onDeleteSession, onForkSession, onExportSession }: SidebarProps) {
   const [query, setQuery] = useState('');
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [actionFor, setActionFor] = useState<Session | null>(null);
@@ -124,6 +125,7 @@ export function Sidebar({ sessions, selectedSession, contextFiles, workspacePath
       return <div className="px-1 py-0.5"><input autoFocus value={categoryText} onChange={event => setCategoryText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') commitCategory(); if (event.key === 'Escape') setCategorizing(null); }} onBlur={commitCategory} placeholder="category (blank = auto)" className="w-full rounded-md border border-border bg-surface-search px-1.5 py-1 text-[11px] text-foreground outline-none" /></div>;
     }
     const active = selectedSession?.id === session.id;
+    const running = Boolean(runningSessions[session.id]);
     return (
       <div key={session.id} className="group relative">
         <button type="button" onClick={() => onSelectSession(session)} className={`item ${active ? 'itemActive' : ''}`}>
@@ -131,6 +133,7 @@ export function Sidebar({ sessions, selectedSession, contextFiles, workspacePath
             <span className="itemTitle" style={{ color: active ? 'var(--foreground)' : session.favorite ? 'var(--title-warning)' : 'var(--muted-foreground)' }}>{session.title || 'Untitled thread'}</span>
             <span className="itemRepo">{session.cwd || 'local workspace'}</span>
           </span>
+          {running && <span className="session-running-dot" title="Run in progress" />}
         </button>
         <button type="button" onClick={event => { event.stopPropagation(); setActionFor(session); }} className="absolute right-1 top-1/2 z-10 hidden h-[22px] w-[22px] -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground group-focus-within:flex group-hover:flex" aria-label="Session actions" aria-expanded={actionFor?.id === session.id}>
           <Settings2 size={11} />

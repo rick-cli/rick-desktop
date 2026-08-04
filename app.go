@@ -80,7 +80,7 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.emitRickStatus()
-	a.startUpdateLoop()
+	a.startUpdateCheck()
 	a.startRickserve()
 }
 
@@ -209,21 +209,21 @@ type Attachment struct {
 	Data      string `json:"data"`
 }
 
-func (a *App) RunPrompt(prompt, model, sessionID string) error {
+func (a *App) RunPrompt(prompt, model, sessionID string) (string, error) {
 	config, err := a.configStore.Load()
 	if err != nil {
-		return err
+		return "", err
 	}
 	return a.runPrompt(prompt, model, sessionID, RunOptions{PermissionProfile: config.PermissionProfile, Sandbox: config.Sandbox, Thinking: config.ThinkingMode, Yolo: config.Yolo})
 }
 
-func (a *App) RunPromptWithOptions(prompt, model, sessionID string, options RunOptions) error {
+func (a *App) RunPromptWithOptions(prompt, model, sessionID string, options RunOptions) (string, error) {
 	return a.runPrompt(prompt, model, sessionID, options)
 }
 
-func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) error {
+func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) (string, error) {
 	if strings.TrimSpace(prompt) == "" {
-		return errors.New("prompt cannot be empty")
+		return "", errors.New("prompt cannot be empty")
 	}
 	a.mu.Lock()
 	service := a.bridge
@@ -235,7 +235,7 @@ func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) err
 		a.mu.Unlock()
 	}
 	if service == nil {
-		return errors.New("rickserve is not available")
+		return "", errors.New("rickserve is not available")
 	}
 	runID := bridge.NewRequestID("run")
 	requestID := bridge.NewRequestID("request")
@@ -251,7 +251,8 @@ func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) err
 		request["resume"] = true
 	} else {
 		// Always mint a session id so interrupt can target this run even on
-		// the first message of a new chat.
+		// the first message of a new chat, and so the caller can register the
+		// session in the sidebar before the daemon persists it.
 		sessionID = fmt.Sprintf("desk-%d", time.Now().UnixNano())
 		request["session_id"] = sessionID
 	}
@@ -288,14 +289,19 @@ func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) err
 	a.currentSessionID = sessionID
 	a.mu.Unlock()
 	if err := service.Send(request); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return sessionID, nil
 }
 
-func (a *App) StopRun() error {
+// StopRun interrupts the run for the given session, falling back to the most
+// recently started run when no id is supplied (e.g. a fresh thread whose
+// run has just been dispatched).
+func (a *App) StopRun(sessionID string) error {
 	a.mu.Lock()
-	sessionID := a.currentSessionID
+	if sessionID == "" {
+		sessionID = a.currentSessionID
+	}
 	service := a.bridge
 	a.mu.Unlock()
 	if service == nil {
@@ -728,6 +734,23 @@ func (a *App) GetProviders() ([]Provider, error) {
 	return result, nil
 }
 
+// GetTools reports the live tool registry of the running rickserve daemon,
+// so the desktop always mirrors the exact tool set the TUI exposes.
+func (a *App) GetTools() ([]bridge.ToolInfo, error) {
+	path, err := a.findRickserve()
+	if err != nil {
+		return nil, err
+	}
+	responses, err := bridge.OneShot(context.Background(), path, map[string]any{"type": "tools"})
+	if err != nil {
+		return nil, err
+	}
+	if len(responses) == 0 {
+		return []bridge.ToolInfo{}, nil
+	}
+	return bridge.DecodeTools(responses[len(responses)-1])
+}
+
 func (a *App) providerType(name string) string {
 	path := filepath.Join(a.rickConfigDir(), "auth.json")
 	data, err := os.ReadFile(path)
@@ -946,6 +969,11 @@ func (a *App) GetUsageStats(sessionID, model string) (UsageStats, error) {
 		return UsageStats{}, err
 	}
 	contextLimit := usage.ResolveContextWindow(filepath.Join(a.rickConfigDir(), "auth.json"), model)
+	// The daemon's advertised window (rickserve /models) is authoritative: it
+	// applies provider-specific overrides the raw auth.json parse cannot see.
+	if advertised, ok := a.advertisedContextWindow(model); ok {
+		contextLimit = advertised
+	}
 	a.mu.Lock()
 	lastUsage := a.lastUsage
 	lastUsageSessionID := a.lastUsageSessionID
@@ -955,6 +983,31 @@ func (a *App) GetUsageStats(sessionID, model string) (UsageStats, error) {
 		contextUsed = lastUsage.ContextTokens
 	}
 	return UsageStats{SessionID: sessionID, Model: model, Session: fromCounters(session), Total: fromCounters(total), ContextUsed: contextUsed, ContextLimit: contextLimit, ContextKnown: contextLimit > 0 && contextUsed > 0}, nil
+}
+
+// advertisedContextWindow returns the context window rickserve advertises for
+// a "provider/model" string, using the cached providers list so repeat reads
+// do not spawn a fresh daemon process.
+func (a *App) advertisedContextWindow(model string) (int, bool) {
+	providerName, modelID, ok := strings.Cut(model, "/")
+	if !ok || providerName == "" || modelID == "" {
+		return 0, false
+	}
+	providers, err := a.GetProviders()
+	if err != nil {
+		return 0, false
+	}
+	for _, provider := range providers {
+		if provider.Name != providerName {
+			continue
+		}
+		for _, candidate := range provider.Models {
+			if candidate.ID == modelID && candidate.ContextWindow > 0 {
+				return candidate.ContextWindow, true
+			}
+		}
+	}
+	return 0, false
 }
 
 type DesktopConfig struct {

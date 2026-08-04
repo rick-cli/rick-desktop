@@ -53,3 +53,29 @@ func IsConfiguredModel(model ModelInfo) bool {
 	// legacy source/configured flags remain for old fixtures.
 	return model.Configured || strings.EqualFold(model.Source, "configured") || (!model.Configured && model.Source == "")
 }
+
+// ToolInfo is one tool reported by rickserve's tools endpoint. The list is
+// the daemon's live registry, so it always matches what the agent loop (and
+// therefore the TUI) actually exposes.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+func DecodeTools(raw json.RawMessage) ([]ToolInfo, error) {
+	var response modelsResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, fmt.Errorf("decode tools response: %w", err)
+	}
+	if response.Type == "error" || response.Error != "" {
+		return nil, fmt.Errorf("rickserve tools: %s", response.Error)
+	}
+	if len(response.Data) == 0 || string(response.Data) == "null" {
+		return []ToolInfo{}, nil
+	}
+	var tools []ToolInfo
+	if err := json.Unmarshal(response.Data, &tools); err != nil {
+		return nil, fmt.Errorf("decode tools data: %w", err)
+	}
+	return tools, nil
+}

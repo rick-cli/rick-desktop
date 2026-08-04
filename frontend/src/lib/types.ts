@@ -15,6 +15,11 @@ export interface Provider {
   models: Model[];
 }
 
+export interface ToolInfo {
+  name: string;
+  description?: string;
+}
+
 export interface SessionUsage {
   input: number;
   output: number;

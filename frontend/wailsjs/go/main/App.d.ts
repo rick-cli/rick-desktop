@@ -3,6 +3,7 @@
 import {main} from '../models';
 import {commands} from '../models';
 import {domain} from '../models';
+import {bridge} from '../models';
 
 export function AddProviderKeys(arg1:string,arg2:Array<string>):Promise<Array<main.AuthProvider>>;
 
@@ -44,6 +45,8 @@ export function GetSessionMessages(arg1:string):Promise<Array<main.ChatMessage>>
 
 export function GetSessions():Promise<Array<main.Session>>;
 
+export function GetTools():Promise<Array<bridge.ToolInfo>>;
+
 export function GetUpdateStatus():Promise<main.UpdateInfo>;
 
 export function GetUsageDaily(arg1:number):Promise<Array<main.DailyUsage>>;
@@ -82,9 +85,9 @@ export function ResetSettings():Promise<void>;
 
 export function RespondPermission(arg1:string,arg2:string):Promise<void>;
 
-export function RunPrompt(arg1:string,arg2:string,arg3:string):Promise<void>;
+export function RunPrompt(arg1:string,arg2:string,arg3:string):Promise<string>;
 
-export function RunPromptWithOptions(arg1:string,arg2:string,arg3:string,arg4:main.RunOptions):Promise<void>;
+export function RunPromptWithOptions(arg1:string,arg2:string,arg3:string,arg4:main.RunOptions):Promise<string>;
 
 export function SaveProvider(arg1:string,arg2:string,arg3:string,arg4:string):Promise<Array<main.AuthProvider>>;
 
@@ -96,7 +99,7 @@ export function SetSessionFavorite(arg1:string,arg2:boolean):Promise<void>;
 
 export function SteerAgent(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
-export function StopRun():Promise<void>;
+export function StopRun(arg1:string):Promise<void>;
 
 export function UpdateConfig(arg1:main.DesktopConfig):Promise<void>;
 

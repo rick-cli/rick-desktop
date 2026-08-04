@@ -14,7 +14,7 @@ Both builds green; rickserve protocol v2 with attachments landed on the Desktop 
 | Capability | Status | Notes |
 |---|---|---|
 | chat run / stop / resume | ✅ | `run` + `cancel` protocol |
-| 18 built-in tools (read/write/edit/bash/grep/glob/list/apply_patch/todo/code_symbols/git/diagnostics/test/tree/fetch/memory/websearch) | ✅ | surfaced as `ToolUse`/`ToolResult` timeline events |
+| 31 tools: 18 core (read/write/edit/bash/grep/glob/list/apply_patch/todoread/todowrite/code_symbols/git/diagnostics/test/tree/fetch/memory/websearch) + 4 goal + 9 subagent/swarm | ✅ | surfaced as `ToolUse`/`ToolResult` timeline events; full list in the Tools panel |
 | tool approvals (`PermissionRequest`) | ✅ | routed via protocol v2 |
 | sandbox (read-only / workspace-write / trusted / off) | ✅ | config + per-run option |
 | YOLO mode | ✅ | toolbar toggle |

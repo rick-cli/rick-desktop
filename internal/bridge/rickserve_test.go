@@ -73,3 +73,25 @@ func TestDecodeModelsSupportsBareArrayAndWrappedShapes(t *testing.T) {
 		t.Fatal("expected error response to fail")
 	}
 }
+
+func TestDecodeTools(t *testing.T) {
+	raw := json.RawMessage(`{"type":"tools","data":[{"name":"read","description":"Read a file."},{"name":"task","description":"Delegate work."}]}`)
+	tools, err := DecodeTools(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tools) != 2 || tools[0].Name != "read" || tools[1].Name != "task" || tools[1].Description == "" {
+		t.Fatalf("decoded wrong: %+v", tools)
+	}
+
+	empty := json.RawMessage(`{"type":"tools","data":[]}`)
+	tools, err = DecodeTools(empty)
+	if err != nil || len(tools) != 0 {
+		t.Fatalf("empty list: tools=%v err=%v", tools, err)
+	}
+
+	errorResponse := json.RawMessage(`{"type":"error","error":"boom"}`)
+	if _, err := DecodeTools(errorResponse); err == nil {
+		t.Fatal("expected error response to fail")
+	}
+}

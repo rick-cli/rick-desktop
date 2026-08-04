@@ -82,6 +82,10 @@ export function GetSessions() {
   return window['go']['main']['App']['GetSessions']();
 }
 
+export function GetTools() {
+  return window['go']['main']['App']['GetTools']();
+}
+
 export function GetUpdateStatus() {
   return window['go']['main']['App']['GetUpdateStatus']();
 }
@@ -186,8 +190,8 @@ export function SteerAgent(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SteerAgent'](arg1, arg2, arg3, arg4);
 }
 
-export function StopRun() {
-  return window['go']['main']['App']['StopRun']();
+export function StopRun(arg1) {
+  return window['go']['main']['App']['StopRun'](arg1);
 }
 
 export function UpdateConfig(arg1) {

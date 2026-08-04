@@ -1,4 +1,4 @@
-import { AuthProvider, ChatMessage, CommandSpec, DailyUsage, DesktopConfig, Provider, ResolvedConfig, RickEvent, RickStatus, RunOptions, RuntimeInfo, Session, UpdateInfo, UsageStats } from './types';
+import { AuthProvider, ChatMessage, CommandSpec, DailyUsage, DesktopConfig, Provider, ResolvedConfig, RickEvent, RickStatus, RunOptions, RuntimeInfo, Session, ToolInfo, UpdateInfo, UsageStats } from './types';
 
 type WailsApp = Record<string, (...args: any[]) => Promise<any>>;
 
@@ -8,6 +8,10 @@ function app(): WailsApp | undefined {
 
 export async function getProviders(): Promise<Provider[]> {
   return (await app()?.GetProviders()) || [];
+}
+
+export async function getTools(): Promise<ToolInfo[]> {
+  return (await app()?.GetTools()) || [];
 }
 
 export async function getSessions(): Promise<Session[]> {
@@ -50,13 +54,15 @@ export async function importSession(path: string, source = 'auto'): Promise<Sess
   return (await app()?.ImportSession(path, source)) || null;
 }
 
-export async function runPrompt(prompt: string, model: string, sessionId?: string, options?: RunOptions): Promise<void> {
-  if (options) await app()?.RunPromptWithOptions(prompt, model, sessionId ?? '', options);
-  else await app()?.RunPrompt(prompt, model, sessionId ?? '');
+export async function runPrompt(prompt: string, model: string, sessionId?: string, options?: RunOptions): Promise<string> {
+  const value = options
+    ? await app()?.RunPromptWithOptions(prompt, model, sessionId ?? '', options)
+    : await app()?.RunPrompt(prompt, model, sessionId ?? '');
+  return typeof value === 'string' ? value : '';
 }
 
-export async function stopRun(): Promise<void> {
-  await app()?.StopRun();
+export async function stopRun(sessionId?: string): Promise<void> {
+  await app()?.StopRun(sessionId ?? '');
 }
 
 export async function respondPermission(requestId: string, decision: 'accept' | 'reject' | 'always'): Promise<void> {
