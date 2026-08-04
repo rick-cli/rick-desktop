@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addUserMessage, hydrateMessages, initialTimelineState, reduceRickEvent, visibleMessages } from './timeline';
+import { accumulateUsage, addUserMessage, hydrateMessages, initialTimelineState, reduceRickEvent, visibleMessages } from './timeline';
 
 function event(overrides: Record<string, unknown>) {
   return overrides as any;
@@ -52,6 +52,51 @@ describe('timeline normalization', () => {
     expect(state.loading).toBe(true);
   });
 
+  it('renders a completed swarm from the swarm tool events', () => {
+    let state = reduceRickEvent(initialTimelineState, event({ kind: 'run.started', run_id: 'r' }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'SwarmStart', run_id: 'r', data: { agents: 2, goal: 'g', name: 'moon-facts' } }));
+    state = reduceRickEvent(state, event({
+      type: 'event', event: 'ToolUse', run_id: 'r',
+      data: { name: 'swarm', input: { action: 'spawn', name: 'moon-facts', agents: [{ name: 'fact-agent-1', role: 'r1' }, { name: 'fact-agent-2', role: 'r2' }] } },
+    }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', run_id: 'r', data: { name: 'team', input: { action: 'complete_task', task_id: 'fact-agent-1', result: 'fact one' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', data: { name: 'team', output: 'task completed', title: 'completed fact-agent-1' } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', data: { name: 'swarm', output: 'Swarm "moon-facts" completed. Goal: g\n[fact-agent-1] fact one\n[fact-agent-2] fact two', title: 'agent team completed' } }));
+    state = reduceRickEvent(state, event({ type: 'done', run_id: 'r' }));
+
+    const swarms = Object.values(state.swarms);
+    expect(swarms).toHaveLength(1);
+    expect(swarms[0].title).toBe('moon-facts');
+    expect(swarms[0].status).toBe('completed');
+    expect(swarms[0].agents).toHaveLength(2);
+    expect(swarms[0].agents.every(agent => agent.status === 'completed')).toBe(true);
+    expect(swarms[0].agents.map(agent => agent.result)).toEqual(['fact one', 'fact two']);
+    expect(swarms[0].final_result).toContain('[fact-agent-2] fact two');
+    expect(state.messages[0].blocks.some(block => block.kind === 'tool')).toBe(false);
+    expect(state.messages[0].blocks.some(block => block.kind === 'swarm')).toBe(true);
+    expect(state.loading).toBe(false);
+  });
+
+  it('renders swarm activity when the bridge reports transport-level tool kinds', () => {
+    // The Go bridge classifies ToolUse/ToolResult by transport name, so the
+    // live app delivers these with kind tool.started/tool.completed/unknown.
+    let state = reduceRickEvent(initialTimelineState, event({ type: 'event', event: 'SwarmStart', kind: 'unknown', run_id: 'r', data: { agents: 2, goal: 'g', name: 'moon-facts' } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', kind: 'tool.started', run_id: 'r', data: { name: 'swarm', input: { action: 'spawn', name: 'moon-facts', agents: [{ name: 'fact-agent-1', role: 'r1' }, { name: 'fact-agent-2', role: 'r2' }] } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', kind: 'tool.started', run_id: 'r', data: { name: 'team', input: { action: 'complete_task', task_id: 'fact-agent-1', result: 'fact one' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', kind: 'tool.completed', run_id: 'r', data: { name: 'team', output: 'task completed', title: 'completed fact-agent-1' } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', kind: 'tool.completed', run_id: 'r', data: { name: 'swarm', output: 'Swarm "moon-facts" completed. Goal: g\n[fact-agent-1] fact one\n[fact-agent-2] fact two', title: 'agent team completed' } }));
+    state = reduceRickEvent(state, event({ type: 'done', kind: 'run.completed', run_id: 'r' }));
+
+    const swarms = Object.values(state.swarms);
+    expect(swarms).toHaveLength(1);
+    expect(swarms[0].title).toBe('moon-facts');
+    expect(swarms[0].status).toBe('completed');
+    expect(swarms[0].agents.map(agent => agent.result)).toEqual(['fact one', 'fact two']);
+    expect(state.messages[0].blocks.some(block => block.kind === 'tool')).toBe(false);
+    expect(state.messages[0].blocks.some(block => block.kind === 'swarm')).toBe(true);
+    expect(state.loading).toBe(false);
+  });
+
   it('derives completion status from legacy tool result events', () => {
     const state = reduceRickEvent(initialTimelineState, event({
       type: 'event',
@@ -61,5 +106,42 @@ describe('timeline normalization', () => {
     }));
 
     expect(state.messages[0].blocks[0].tool?.status).toBe('completed');
+  });
+
+  it('merges a tool result into its running card instead of duplicating it', () => {
+    let state = reduceRickEvent(initialTimelineState, event({ type: 'event', event: 'ToolUse', run_id: 'r', sequence: 1, data: { name: 'websearch', input: { query: 'x' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', run_id: 'r', sequence: 2, data: { name: 'websearch', input: { query: 'y' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', sequence: 3, data: { name: 'websearch', output: 'results' } }));
+
+    const tools = state.messages[0].blocks.filter(block => block.kind === 'tool').map(block => block.tool);
+    expect(tools).toHaveLength(2);
+    expect(tools[0].status).toBe('running');
+    expect(tools[1].status).toBe('completed');
+    expect(tools[1].result).toBe('results');
+  });
+
+  it('accumulates per-call usage deltas into session totals', () => {
+    const first = accumulateUsage(undefined, event({ input_tokens: 100, output_tokens: 50, cache_read_tokens: 30, cache_write_tokens: 10 }));
+    const second = accumulateUsage(first, event({ input_tokens: 40, output_tokens: 60, cache_read_tokens: 20 }));
+    expect(second?.input_tokens).toBe(140);
+    expect(second?.output_tokens).toBe(110);
+    expect(second?.cache_read_tokens).toBe(50);
+    expect(second?.cache_write_tokens).toBe(10);
+    expect(second?.cached_tokens).toBe(60);
+    expect(second?.total_tokens).toBe(310);
+  });
+
+  it('keeps the last-seen context figures across usage deltas', () => {
+    const first = accumulateUsage(undefined, event({ input_tokens: 10, context_tokens: 512, context_limit: 128000 }));
+    const second = accumulateUsage(first, event({ output_tokens: 5 }));
+    expect(second?.context_tokens).toBe(512);
+    expect(second?.context_limit).toBe(128000);
+  });
+
+  it('reduces usage events through accumulation', () => {
+    let state = reduceRickEvent(initialTimelineState, event({ kind: 'usage', data: { input_tokens: 10, output_tokens: 2 } }));
+    state = reduceRickEvent(state, event({ kind: 'usage', data: { input_tokens: 8, output_tokens: 3 } }));
+    expect(state.usage?.input_tokens).toBe(18);
+    expect(state.usage?.output_tokens).toBe(5);
   });
 });

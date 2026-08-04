@@ -88,7 +88,7 @@ export function reduceRickEvent(state: TimelineState, event: RickEvent): Timelin
     case 'swarm.completed':
       return updateSwarm(next, runId, event, kind);
     case 'usage':
-      return { ...next, usage: event.usage || parseUsage(event.data) };
+      return { ...next, usage: accumulateUsage(next.usage, event.usage || parseUsage(event.data)) };
     case 'run.completed':
       return finishAssistant(next, runId, false);
     case 'run.cancelled':
@@ -127,7 +127,21 @@ function updateTool(state: TimelineState, runId: string | undefined, event: Rick
   const messages = [...state.messages];
   const messageId = index >= 0 ? messages[index].id : event.message_id || `assistant-${runId || 'current'}`;
   const message = index >= 0 ? { ...messages[index], blocks: [...messages[index].blocks] } : { id: messageId, role: 'assistant' as const, runId, blocks: [], done: false };
-  const blockIndex = message.blocks.findIndex(block => block.kind === 'tool' && block.tool?.id === tool.id);
+  let blockIndex = message.blocks.findIndex(block => block.kind === 'tool' && block.tool?.id === tool.id && block.tool?.name === tool.name);
+  // The daemon emits ToolUse and ToolResult without a shared id, so match by
+  // name instead: a completion lands on the most recent running card, and a
+  // new call reuses the most recent completed card of the same tool. This
+  // keeps repeated tool calls from stacking duplicate cards.
+  if (blockIndex < 0) {
+    const matchStatus = tool.status === 'completed' || tool.status === 'failed' ? 'running' : 'completed';
+    for (let i = message.blocks.length - 1; i >= 0; i -= 1) {
+      const block = message.blocks[i];
+      if (block.kind === 'tool' && block.tool?.name === tool.name && block.tool?.status === matchStatus) {
+        blockIndex = i;
+        break;
+      }
+    }
+  }
   const block: TimelineBlock = { id: `${message.id}-tool-${tool.id}`, kind: 'tool', tool };
   if (blockIndex >= 0) message.blocks[blockIndex] = { ...message.blocks[blockIndex], tool };
   else message.blocks.push(block);
@@ -139,10 +153,16 @@ function updateTool(state: TimelineState, runId: string | undefined, event: Rick
 function updateSwarm(state: TimelineState, runId: string | undefined, event: RickEvent, kind: EventKind): TimelineState {
   const data = asObject(event.data);
   const swarm = normalizeSwarm(data, event, kind);
-  const previous = state.swarms[swarm.id];
+  const previous = resolveSwarm(state.swarms, swarm);
+  const id = previous?.id || swarm.id;
   const merged: SwarmActivity = {
-    ...previous,
+    ...(previous || { id, agents: [] }),
     ...swarm,
+    id,
+    title: previous?.title || swarm.title || 'Swarm team',
+    status: swarm.status || previous?.status || (kind === 'swarm.completed' ? 'completed' : 'running'),
+    final_result: swarm.final_result || previous?.final_result,
+    error: swarm.error || previous?.error,
     agents: mergeAgents(previous?.agents || [], swarm.agents || []),
   };
   const swarms = { ...state.swarms, [merged.id]: merged };
@@ -155,6 +175,23 @@ function updateSwarm(state: TimelineState, runId: string | undefined, event: Ric
   else message.blocks.push({ id: `${message.id}-swarm-${merged.id}`, kind: 'swarm', swarm: merged });
   if (index < 0) messages.push(message); else messages[index] = message;
   return { ...state, messages, swarms, loading: kind === 'swarm.completed' ? state.loading : true };
+}
+
+// resolveSwarm finds the swarm record an event belongs to. Team tool events
+// only carry an agent id (task_id / "completed <agent>"), so match those by
+// agent before falling back to the most recently created swarm.
+function resolveSwarm(swarms: Record<string, SwarmActivity>, candidate: SwarmActivity): SwarmActivity | undefined {
+  if (candidate.id && swarms[candidate.id]) return swarms[candidate.id];
+  if (candidate.title) {
+    const byTitle = Object.values(swarms).find(swarm => swarm.title === candidate.title);
+    if (byTitle) return byTitle;
+  }
+  for (const agent of candidate.agents) {
+    const byAgent = Object.values(swarms).find(swarm => swarm.agents.some(existing => existing.id === agent.id));
+    if (byAgent) return byAgent;
+  }
+  const recent = Object.values(swarms);
+  return recent[recent.length - 1];
 }
 
 function updatePermission(state: TimelineState, runId: string | undefined, event: RickEvent): TimelineState {
@@ -236,11 +273,18 @@ function findAssistant(messages: TimelineMessage[], runId?: string, messageId?: 
 }
 
 function normalizeKind(event: RickEvent): EventKind {
-  if (event.kind) return event.kind as EventKind;
+  const name = (event.event || '').toLowerCase().replace(/[_-]/g, '.').replace(/^event\./, '');
+  // Tool events carry the tool name in data.name; swarm/team tool calls must
+  // surface as swarm activity even when the transport kind says tool.started.
+  if (name.includes('tool')) {
+    const toolName = String(asObject(event.data).name || '').toLowerCase();
+    if (toolName === 'swarm') return name.includes('result') ? 'swarm.completed' : 'swarm.started';
+    if (toolName === 'team') return 'agent.updated';
+  }
+  if (event.kind && event.kind !== 'unknown') return event.kind as EventKind;
   if (event.type === 'done') return 'run.completed';
   if (event.type === 'cancelled') return 'run.cancelled';
   if (event.type === 'error') return 'run.failed';
-  const name = (event.event || '').toLowerCase().replace(/[_-]/g, '.').replace(/^event\./, '');
   if (name === 'content' || name === 'text' || name === 'delta') return 'text.delta';
   if (name.includes('reason') || name.includes('think')) return 'reasoning.delta';
   if (name.includes('tool')) {
@@ -292,18 +336,68 @@ function normalizeTool(data: Record<string, unknown>, event: RickEvent, kind: Ev
 
 function normalizeSwarm(data: Record<string, unknown>, event: RickEvent, kind: EventKind): SwarmActivity {
   const nested = asObject(data.swarm || data.team || data);
-  const rawAgents = Array.isArray(nested.agents) ? nested.agents : [];
+  const input = asObject(nested.input || data.input);
+  const name = swarmName(data, nested);
+  const rawAgents = Array.isArray(nested.agents) ? nested.agents : Array.isArray(input.agents) ? input.agents : [];
+  const agents: SwarmActivity['agents'] = [];
+  for (const agent of rawAgents) {
+    const value = asObject(agent);
+    const agentName = typeof value.name === 'string' ? value.name : typeof value.task_id === 'string' ? value.task_id : 'agent';
+    agents.push({
+      id: String(value.id || value.agent_id || agentName),
+      name: typeof value.name === 'string' ? value.name : undefined,
+      task: typeof value.role === 'string' ? value.role : typeof value.task === 'string' ? value.task : undefined,
+      status: String(value.status || 'running'),
+      current_tool: value.current_tool as string | undefined,
+      action: value.action as string | undefined,
+      result: value.result as string | undefined,
+      error: value.error as string | undefined,
+    });
+  }
+  // team tool calls report one agent finishing: input.task_id + result, or a
+  // ToolResult title shaped "completed <agent>".
+  if (typeof input.task_id === 'string') {
+    agents.push({
+      id: input.task_id,
+      name: input.task_id,
+      status: 'completed',
+      result: typeof input.result === 'string' ? input.result : undefined,
+    });
+  }
+  const completionTitle = typeof data.title === 'string' ? data.title : '';
+  if (/^completed\s+/.test(completionTitle)) {
+    agents.push({ id: completionTitle.replace(/^completed\s+/, ''), name: completionTitle.replace(/^completed\s+/, ''), status: 'completed' });
+  }
+  // the swarm completion result lists per-agent output as "[name] result".
+  if (kind === 'swarm.completed' && typeof data.output === 'string') {
+    for (const line of data.output.split('\n')) {
+      const match = /^\[([^\]]+)\]\s*(.*)$/.exec(line.trim());
+      if (match) agents.push({ id: match[1], name: match[1], status: 'completed', result: match[2] });
+    }
+  }
   return {
-    id: String(nested.id || nested.swarm_id || event.swarm_id || `swarm-${event.sequence || Date.now()}`),
-    title: typeof nested.title === 'string' ? nested.title : typeof nested.name === 'string' ? nested.name : 'Swarm team',
-    status: String(nested.status || (kind === 'swarm.completed' ? 'completed' : 'running')),
-    agents: rawAgents.map(agent => {
-      const value = asObject(agent);
-      return { id: String(value.id || value.agent_id || 'agent'), name: value.name as string | undefined, task: value.task as string | undefined, status: String(value.status || 'running'), current_tool: value.current_tool as string | undefined, action: value.action as string | undefined, result: value.result as string | undefined, error: value.error as string | undefined };
-    }),
-    final_result: typeof nested.final_result === 'string' ? nested.final_result : undefined,
+    id: String(nested.id || nested.swarm_id || event.swarm_id || (name ? `swarm-${name}` : `swarm-${event.sequence || Date.now()}`)),
+    title: name ? name : undefined,
+    status: String(nested.status || (kind === 'swarm.completed' ? 'completed' : kind === 'swarm.started' ? 'running' : '')),
+    agents,
+    final_result: typeof nested.final_result === 'string' ? nested.final_result : kind === 'swarm.completed' && typeof data.output === 'string' ? data.output : undefined,
     error: typeof nested.error === 'string' ? nested.error : event.error,
   };
+}
+
+// swarmName derives the stable swarm name from the payload shapes rickserve
+// emits: SwarmStart carries it in data.name, the spawn call in input.name, and
+// the completion result embeds it in the output text.
+function swarmName(data: Record<string, unknown>, nested: Record<string, unknown>): string {
+  const input = asObject(nested.input || data.input);
+  if (typeof input.name === 'string' && input.name.trim()) return input.name.trim();
+  const toolName = typeof data.name === 'string' ? data.name : '';
+  if (toolName && toolName !== 'swarm' && toolName !== 'team') return toolName;
+  if (typeof data.output === 'string') {
+    const match = /Swarm\s+"([^"]+)"/.exec(data.output);
+    if (match) return match[1];
+  }
+  return '';
 }
 
 function mergeAgents(previous: SwarmActivity['agents'], incoming: SwarmActivity['agents']): SwarmActivity['agents'] {
@@ -315,7 +409,7 @@ function mergeAgents(previous: SwarmActivity['agents'], incoming: SwarmActivity[
   return result;
 }
 
-function parseUsage(value: unknown): Usage | undefined {
+export function parseUsage(value: unknown): Usage | undefined {
   const data = asObject(value);
   const nested = asObject(data.usage);
   const source = Object.keys(nested).length ? { ...data, ...nested } : data;
@@ -334,6 +428,27 @@ function parseUsage(value: unknown): Usage | undefined {
     total_tokens: numberValue(source, 'total_tokens', 'total') || input + output,
     context_tokens: context,
     context_limit: numberValue(source, 'context_limit', 'context_window', 'max_context_tokens'),
+  };
+}
+
+// accumulateUsage sums rickserve's per-usage-event deltas into session totals
+// while keeping the last-seen context figures.
+export function accumulateUsage(previous: Usage | undefined, delta: Usage | undefined): Usage | undefined {
+  if (!delta) return previous;
+  const prev = previous || {};
+  const input = delta.input_tokens || 0;
+  const output = delta.output_tokens || 0;
+  const cacheRead = delta.cache_read_tokens || 0;
+  const cacheWrite = delta.cache_write_tokens || 0;
+  return {
+    input_tokens: (prev.input_tokens || 0) + input,
+    output_tokens: (prev.output_tokens || 0) + output,
+    cache_read_tokens: (prev.cache_read_tokens || 0) + cacheRead,
+    cache_write_tokens: (prev.cache_write_tokens || 0) + cacheWrite,
+    cached_tokens: (prev.cached_tokens || 0) + cacheRead + cacheWrite,
+    total_tokens: (prev.total_tokens || 0) + input + output + cacheRead + cacheWrite,
+    context_tokens: delta.context_tokens || prev.context_tokens,
+    context_limit: delta.context_limit || prev.context_limit,
   };
 }
 

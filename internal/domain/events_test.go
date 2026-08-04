@@ -50,6 +50,11 @@ func TestDecodeRickEventClassifiesRickserveEventNames(t *testing.T) {
 	}{
 		{"tool use", `{"type":"event","event":"ToolUse","data":{"name":"read","input":{}}}`, EventToolStarted},
 		{"tool result", `{"type":"event","event":"ToolResult","data":{"name":"read","output":"x"}}`, EventToolCompleted},
+		{"swarm start", `{"type":"event","event":"SwarmStart","data":{"agents":2,"goal":"g","name":"moon-facts"}}`, EventSwarmStarted},
+		{"swarm tool use", `{"type":"event","event":"ToolUse","data":{"name":"swarm","input":{"action":"spawn"}}}`, EventSwarmStarted},
+		{"team tool use", `{"type":"event","event":"ToolUse","data":{"name":"team","input":{"action":"complete_task"}}}`, EventAgentUpdated},
+		{"team tool result", `{"type":"event","event":"ToolResult","data":{"name":"team","output":"task completed"}}`, EventAgentUpdated},
+		{"swarm tool result", `{"type":"event","event":"ToolResult","data":{"name":"swarm","output":"Swarm done"}}`, EventSwarmCompleted},
 		{"permission request", `{"type":"event","event":"PermissionRequest","data":{"request_id":"r1","command":"rm -rf /"}}`, EventPermissionAsk},
 		{"cancelled", `{"type":"cancelled","session_id":"s"}`, EventRunCancelled},
 	}

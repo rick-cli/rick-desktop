@@ -97,7 +97,7 @@ func DecodeRickEvent(raw []byte, fallbackSequence int64) (RickEvent, error) {
 	}
 
 	rawName := envelope.Event
-	kind := classifyEvent(envelope.Type, rawName, envelope.Error)
+	kind := classifyEvent(envelope.Type, rawName, envelope.Error, dataToolName(envelope.Data))
 	event := RickEvent{
 		Type:      envelope.Type,
 		RequestID: envelope.RequestID,
@@ -130,7 +130,7 @@ func DecodeRickEvent(raw []byte, fallbackSequence int64) (RickEvent, error) {
 	return event, nil
 }
 
-func classifyEvent(envelopeType, name, errorText string) EventKind {
+func classifyEvent(envelopeType, name, errorText, toolName string) EventKind {
 	if envelopeType == "done" || strings.EqualFold(name, "done") {
 		return EventRunCompleted
 	}
@@ -150,6 +150,14 @@ func classifyEvent(envelopeType, name, errorText string) EventKind {
 	case "reasoning", "thinking", "reasoning.delta", "thinking.delta":
 		return EventReasoningDelta
 	case "tool.started", "tool.start", "tool.call", "tool.called", "tooluse":
+		// Swarm and team tool calls are surfaced as swarm activity; the
+		// tool's name lives in the payload, not the transport event name.
+		switch toolName {
+		case "swarm":
+			return EventSwarmStarted
+		case "team":
+			return EventAgentUpdated
+		}
 		return EventToolStarted
 	case "tool.progress", "tool.output":
 		return EventToolProgress
@@ -158,14 +166,20 @@ func classifyEvent(envelopeType, name, errorText string) EventKind {
 	case "permission.request", "permission.requested", "permission", "permissionrequest":
 		return EventPermissionAsk
 	case "tool.completed", "tool.complete", "tool.result", "tool.finished", "toolresult":
+		switch toolName {
+		case "swarm":
+			return EventSwarmCompleted
+		case "team":
+			return EventAgentUpdated
+		}
 		return EventToolCompleted
 	case "tool.failed", "tool.error":
 		return EventToolFailed
-	case "swarm.started", "team.started":
+	case "swarm.started", "team.started", "swarmstart", "swarm.start", "swarm":
 		return EventSwarmStarted
 	case "agent.updated", "agent.started", "agent.completed", "agent.result":
 		return EventAgentUpdated
-	case "swarm.completed", "team.completed", "swarm.finished":
+	case "swarm.completed", "team.completed", "swarm.finished", "swarm.complete":
 		return EventSwarmCompleted
 	case "usage", "tokens", "usage.updated":
 		return EventUsage
@@ -195,6 +209,25 @@ func dataString(raw json.RawMessage, keys ...string) string {
 	for _, key := range keys {
 		if text, ok := object[key].(string); ok {
 			return text
+		}
+	}
+	return ""
+}
+
+// dataToolName extracts the tool name from an event payload. Swarm/team tool
+// calls share the transport-level ToolUse/ToolResult names, so the tool's
+// name (data.name) is what tells them apart from ordinary tool calls.
+func dataToolName(raw json.RawMessage) string {
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	if name, ok := value["name"].(string); ok {
+		return strings.ToLower(strings.TrimSpace(name))
+	}
+	if tool, ok := value["tool"].(map[string]any); ok {
+		if name, ok := tool["name"].(string); ok {
+			return strings.ToLower(strings.TrimSpace(name))
 		}
 	}
 	return ""
