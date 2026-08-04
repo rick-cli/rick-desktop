@@ -15,10 +15,6 @@ const GitHubRepo = "rick-cli/rick-desktop"
 // are published.
 const RickCLIRepo = "rick-cli/rick"
 
-// updateCheckInterval is how often the app re-queries GitHub for a newer
-// release after the initial check at startup.
-const updateCheckInterval = 10 * time.Minute
-
 // updateDownloadTimeout bounds a single release query/download so a stalled
 // network never blocks the UI forever.
 const updateDownloadTimeout = 5 * time.Minute

@@ -66,20 +66,12 @@ func portableAssetName(version, goos, goarch string) string {
 	return base
 }
 
-func (a *App) startUpdateLoop() {
+// startUpdateCheck performs the single update check at app start. Updates
+// are never installed or even re-checked automatically afterwards: the result
+// is surfaced to the frontend, which shows a manual update button when a
+// newer release exists.
+func (a *App) startUpdateCheck() {
 	a.checkForUpdates()
-	go func() {
-		ticker := time.NewTicker(updateCheckInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				a.checkForUpdates()
-			case <-a.ctx.Done():
-				return
-			}
-		}
-	}()
 }
 
 // checkForUpdates queries the latest GitHub release for Rick Desktop and
