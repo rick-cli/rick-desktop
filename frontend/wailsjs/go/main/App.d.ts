@@ -65,7 +65,7 @@ export function KillAgent(arg1:string,arg2:string):Promise<void>;
 
 export function ListAgents(arg1:string):Promise<void>;
 
-export function PickBackgroundFile(arg1:string):Promise<string>;
+export function PickBackgroundFile():Promise<string>;
 
 export function PickFolder():Promise<string>;
 

@@ -19,20 +19,20 @@ export function UsageStatus({ tokens, contextUsed, contextLimit }: { tokens: Ses
   return (
     <div className="usage-status">
       <span className="usage-token" title="Input tokens">
-        <ArrowDownToLine size={11} />
+        <ArrowDownToLine size={13} />
         <span>{formatTokens(tokens.input)}</span>
       </span>
       <span className="usage-token" title="Output tokens">
-        <ArrowUpFromLine size={11} />
+        <ArrowUpFromLine size={13} />
         <span>{formatTokens(tokens.output)}</span>
       </span>
       <span className="usage-token usage-token-cached" title="Cached tokens">
-        <Database size={11} />
+        <Database size={13} />
         <span>{formatTokens(tokens.cached)}</span>
       </span>
       {hasLimit && (
         <span className="usage-context" title={`Context window: ${formatTokens(contextUsed)} of ${formatTokens(contextLimit)} tokens`}>
-          <Gauge size={11} />
+          <Gauge size={13} />
           <span>{formatTokens(contextUsed)}/{formatTokens(contextLimit)}</span>
           <span className="usage-context-bar">
             <span className="usage-context-fill" style={{ width: `${percent}%` }} />

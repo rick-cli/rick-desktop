@@ -291,7 +291,7 @@ export interface DesktopConfig {
   yolo: boolean;
   rickserve_path?: string;
   workspace_path?: string;
-  background_mode?: 'theme' | 'image' | 'video';
+  background_mode?: 'theme' | 'image';
   background_path?: string;
 }
 

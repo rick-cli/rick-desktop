@@ -122,8 +122,8 @@ export function ListAgents(arg1) {
   return window['go']['main']['App']['ListAgents'](arg1);
 }
 
-export function PickBackgroundFile(arg1) {
-  return window['go']['main']['App']['PickBackgroundFile'](arg1);
+export function PickBackgroundFile() {
+  return window['go']['main']['App']['PickBackgroundFile']();
 }
 
 export function PickFolder() {

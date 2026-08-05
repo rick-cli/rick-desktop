@@ -507,7 +507,7 @@ export default function App() {
   if (initStatus === 'ready' && rickStatus && !rickStatus.installed) return <SetupScreen status={rickStatus} busy={installingRick} error={error} onInstall={handleInstallRick} />;
 
   const customBackground = (desktopConfig?.background_mode || 'theme') !== 'theme';
-  return <div className={`flex h-screen w-screen overflow-hidden bg-background${customBackground ? ' has-app-background' : ''}`}><FullAppBackground mode={desktopConfig?.background_mode} src={backgroundSrc} /><Sidebar sessions={sessions} selectedSession={selectedSession} runningSessions={runningSessions} contextFiles={contextFiles} workspacePath={desktopConfig?.workspace_path} onPickFolder={handlePickFolder} onSelectSession={handleSelectSession} onNewChat={handleNewChat} onOpenSettings={() => setShowSettings(true)} onRenameSession={handleRenameSession} onSetCategory={handleSetCategory} onSetFavorite={handleSetFavorite} onDeleteSession={handleDeleteSession} onForkSession={handleForkSession} onExportSession={handleExportSession} /><div className="flex flex-1 flex-col app-shell"><header className="header"><div className="left"><span className="repo">{selectedSession?.cwd || 'rick-desktop'}</span><span className="sep">/</span><span className="branch"><span className="branchGlyph">⑂</span><span className="branchText">{selectedSession?.title || 'New thread'}</span></span></div><div className="right">{updateInfo?.update_available && <button type="button" onClick={handleInstallUpdate} disabled={updating} title={updateInfo.release_notes ? `Update to v${updateInfo.latest_version}\n\n${updateInfo.release_notes}` : `Update to v${updateInfo.latest_version}`} className="update-pill">{updating ? <RefreshCw size={12} className="animate-spin" /> : <ArrowDownToLine size={12} />}{updating ? 'Updating…' : `Update to v${updateInfo.latest_version}`}</button>}<button type="button" onClick={() => handleUndoRedo('undo')} title="Undo last change (snapshot)" className="iconBtn"><Undo2 size={13} /></button><button type="button" onClick={() => handleUndoRedo('redo')} title="Redo change (snapshot)" className="iconBtn"><Redo2 size={13} /></button><button type="button" onClick={refreshSessions} title="Refresh sessions" className="iconBtn"><RefreshCw size={13} /></button></div></header><main className="flex-1 overflow-hidden"><ChatPage messages={visible} loading={timeline.loading} error={error || timeline.error} commandCatalog={commandCatalog} showReasoning={showReasoning} providers={providers} currentModel={currentModel} onModelChange={setCurrentModel} thinkingMode={desktopConfig?.thinking_mode || 'auto'} onThinkingModeChange={value => patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] })} yolo={desktopConfig?.yolo || false} onYoloChange={value => patchConfig({ yolo: value })} permission={desktopConfig?.permission_profile || 'standard'} onPermissionChange={value => patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] })} onSend={handleSend} onStop={handleStop} onOpenSwarm={setOpenSwarm} agentType={agentType} onAgentTypeChange={setAgentType} onRespondPermission={handleApprove} pendingApprovals={pendingApprovals(timeline.messages)} selectedSession={selectedSession?.id} tokenUsage={sessionTokens} contextUsed={contextUsage.used} contextLimit={contextUsage.limit} /></main></div>{openSwarm && <SwarmInspector swarm={openSwarm} onClose={() => setOpenSwarm(null)} />}</div>;
+  return <div className={`flex h-screen w-screen overflow-hidden bg-background${customBackground ? ' has-app-background' : ''}`}><FullAppBackground src={backgroundSrc} /><Sidebar sessions={sessions} selectedSession={selectedSession} runningSessions={runningSessions} contextFiles={contextFiles} workspacePath={desktopConfig?.workspace_path} onPickFolder={handlePickFolder} onSelectSession={handleSelectSession} onNewChat={handleNewChat} onOpenSettings={() => setShowSettings(true)} onRenameSession={handleRenameSession} onSetCategory={handleSetCategory} onSetFavorite={handleSetFavorite} onDeleteSession={handleDeleteSession} onForkSession={handleForkSession} onExportSession={handleExportSession} /><div className="flex flex-1 flex-col app-shell"><header className="header"><div className="left"><span className="repo">{selectedSession?.cwd || 'rick-desktop'}</span><span className="sep">/</span><span className="branch"><span className="branchGlyph">⑂</span><span className="branchText">{selectedSession?.title || 'New thread'}</span></span></div><div className="right">{updateInfo?.update_available && <button type="button" onClick={handleInstallUpdate} disabled={updating} title={updateInfo.release_notes ? `Update to v${updateInfo.latest_version}\n\n${updateInfo.release_notes}` : `Update to v${updateInfo.latest_version}`} className="update-pill">{updating ? <RefreshCw size={12} className="animate-spin" /> : <ArrowDownToLine size={12} />}{updating ? 'Updating…' : `Update to v${updateInfo.latest_version}`}</button>}<button type="button" onClick={() => handleUndoRedo('undo')} title="Undo last change (snapshot)" className="iconBtn"><Undo2 size={13} /></button><button type="button" onClick={() => handleUndoRedo('redo')} title="Redo change (snapshot)" className="iconBtn"><Redo2 size={13} /></button><button type="button" onClick={refreshSessions} title="Refresh sessions" className="iconBtn"><RefreshCw size={13} /></button></div></header><main className="flex-1 overflow-hidden"><ChatPage messages={visible} loading={timeline.loading} error={error || timeline.error} commandCatalog={commandCatalog} showReasoning={showReasoning} providers={providers} currentModel={currentModel} onModelChange={setCurrentModel} thinkingMode={desktopConfig?.thinking_mode || 'auto'} onThinkingModeChange={value => patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] })} yolo={desktopConfig?.yolo || false} onYoloChange={value => patchConfig({ yolo: value })} permission={desktopConfig?.permission_profile || 'standard'} onPermissionChange={value => patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] })} onSend={handleSend} onStop={handleStop} onOpenSwarm={setOpenSwarm} agentType={agentType} onAgentTypeChange={setAgentType} onRespondPermission={handleApprove} pendingApprovals={pendingApprovals(timeline.messages)} selectedSession={selectedSession?.id} tokenUsage={sessionTokens} contextUsed={contextUsage.used} contextLimit={contextUsage.limit} /></main></div>{openSwarm && <SwarmInspector swarm={openSwarm} onClose={() => setOpenSwarm(null)} />}</div>;
 }
 
 function SetupScreen({ status, busy, error, onInstall }: { status: RickStatus; busy: boolean; error?: string; onInstall: () => void }) {
@@ -945,38 +945,20 @@ export function SettingsPage({ onClose, initialConfig }: SettingsPageProps) {
   </div>;
 }
 
-// The backend streams the configured background file at this path on the
-// wails:// scheme (see App.backgroundHandler), so <img>/<video> load it like
-// any other asset: no data URLs (rejected for <video>) and no file:// paths
-// (blocked cross-origin).
+// The backend streams the configured background image at this path on the
+// wails:// scheme (see App.backgroundHandler), so <img> loads it like any
+// other asset: no data URLs and no blocked file:// paths.
 const BACKGROUND_URL = '/__background';
 
 function backgroundSrcFor(mode?: string, path?: string): string {
-  return mode && mode !== 'theme' && path ? BACKGROUND_URL : '';
+  return mode === 'image' && path ? BACKGROUND_URL : '';
 }
 
-function FullAppBackground({ mode, src }: { mode?: string; src: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  // Pause background video while the window is hidden so it does not burn
-  // bandwidth decoding frames nobody sees; resume on return.
-  useEffect(() => {
-    if (mode !== 'video') return;
-    const video = videoRef.current;
-    const onVisibility = () => {
-      if (document.hidden) video?.pause();
-      else video?.play().catch(() => {});
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [mode]);
-  if (!mode || mode === 'theme' || !src) return null;
+function FullAppBackground({ src }: { src: string }) {
+  if (!src) return null;
   return (
     <div className="app-background" aria-hidden="true">
-      {mode === 'image' ? (
-        <img className="app-background-media" src={src} alt="" draggable={false} />
-      ) : (
-        <video ref={videoRef} className="app-background-media" src={src} autoPlay muted loop playsInline disablePictureInPicture disableRemotePlayback preload="metadata" />
-      )}
+      <img className="app-background-media" src={src} alt="" draggable={false} />
       <div className="app-background-scrim" />
     </div>
   );
@@ -989,12 +971,14 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (val
 function Appearance({ config, save }: { config: DesktopConfig; save: (patch: Partial<DesktopConfig>) => Promise<void> }) {
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState('');
-  const mode = config.background_mode || 'theme';
+  // A background_mode left as "video" by an older build behaves like "theme";
+  // only images are supported now.
+  const mode = config.background_mode === 'image' ? 'image' : 'theme';
   const chooseFile = async () => {
     setPicking(true);
     setPickError('');
     try {
-      const path = await pickBackgroundFile(mode);
+      const path = await pickBackgroundFile();
       if (path) await save({ background_path: path });
     } catch (cause) {
       setPickError(cause instanceof Error ? cause.message : 'Failed to choose file');
@@ -1002,7 +986,7 @@ function Appearance({ config, save }: { config: DesktopConfig; save: (patch: Par
       setPicking(false);
     }
   };
-  return <><Card title="Theme" description="Choose a complete desktop palette. Graphite is the default flat workspace theme."><Select value={config.theme === 'dark' ? 'graphite' : config.theme} onChange={value => save({ theme: value as DesktopConfig['theme'] })}><option value="graphite">Graphite (default)</option><option value="dracula">Dracula</option><option value="charcoal">Charcoal</option><option value="midnight">Midnight</option><option value="nord">Nord</option><option value="gruvbox">Gruvbox</option><option value="github-dark">GitHub Dark</option><option value="tokyo-night">Tokyo Night</option><option value="catppuccin">Catppuccin</option><option value="one-dark">One Dark</option><option value="solarized-dark">Solarized Dark</option><option value="system">Follow system</option><option value="light">Light</option></Select></Card><Card title="Background" description="Use the theme colors, or layer a custom image or video behind a readability overlay. The overlay tint follows the current theme."><div className="space-y-3"><Select value={mode} onChange={value => save({ background_mode: value as DesktopConfig['background_mode'] })}><option value="theme">Default (theme colors)</option><option value="image">Custom image</option><option value="video">Custom video</option></Select>{mode !== 'theme' && <div className="flex items-center gap-2"><input readOnly value={config.background_path || ''} placeholder="No file selected" title={config.background_path || undefined} className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2.5 py-1.5 font-mono text-[10px] text-muted-foreground outline-none" /><button type="button" onClick={chooseFile} disabled={picking} className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-[11px] text-foreground hover:bg-surface-2 disabled:opacity-60">{picking ? '…' : 'Choose file'}</button>{config.background_path ? <button type="button" onClick={() => save({ background_path: '' })} className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-[11px] text-foreground hover:bg-surface-2">Remove</button> : null}</div>}{pickError && <p className="text-[10px] text-muted-foreground">{pickError}</p>}</div></Card><Card title="Typography"><Select value={config.font_size} onChange={value => save({ font_size: value as DesktopConfig['font_size'] })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></Select></Card><Card title="Runtime display" description="Reasoning is kept separate from answer text and can be collapsed without deleting the event stream."><div className="space-y-4"><Toggle checked={config.show_reasoning} onChange={value => save({ show_reasoning: value })} label="Show Thinking blocks" /><Toggle checked={config.reasoning_expanded} onChange={value => save({ reasoning_expanded: value })} label="Expand Thinking blocks by default" /></div></Card></>;
+  return <><Card title="Theme" description="Choose a complete desktop palette. Graphite is the default flat workspace theme."><Select value={config.theme === 'dark' ? 'graphite' : config.theme} onChange={value => save({ theme: value as DesktopConfig['theme'] })}><option value="graphite">Graphite (default)</option><option value="dracula">Dracula</option><option value="charcoal">Charcoal</option><option value="midnight">Midnight</option><option value="nord">Nord</option><option value="gruvbox">Gruvbox</option><option value="github-dark">GitHub Dark</option><option value="tokyo-night">Tokyo Night</option><option value="catppuccin">Catppuccin</option><option value="one-dark">One Dark</option><option value="solarized-dark">Solarized Dark</option><option value="system">Follow system</option><option value="light">Light</option></Select></Card><Card title="Background" description="Use the theme colors, or layer a custom image behind a readability overlay. The overlay tint follows the current theme."><div className="space-y-3"><Select value={mode} onChange={value => save({ background_mode: value as DesktopConfig['background_mode'] })}><option value="theme">Default (theme colors)</option><option value="image">Custom image</option></Select>{mode !== 'theme' && <div className="flex items-center gap-2"><input readOnly value={config.background_path || ''} placeholder="No file selected" title={config.background_path || undefined} className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-2.5 py-1.5 font-mono text-[10px] text-muted-foreground outline-none" /><button type="button" onClick={chooseFile} disabled={picking} className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-[11px] text-foreground hover:bg-surface-2 disabled:opacity-60">{picking ? '…' : 'Choose file'}</button>{config.background_path ? <button type="button" onClick={() => save({ background_path: '' })} className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-[11px] text-foreground hover:bg-surface-2">Remove</button> : null}</div>}{pickError && <p className="text-[10px] text-muted-foreground">{pickError}</p>}</div></Card><Card title="Typography"><Select value={config.font_size} onChange={value => save({ font_size: value as DesktopConfig['font_size'] })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></Select></Card><Card title="Runtime display" description="Reasoning is kept separate from answer text and can be collapsed without deleting the event stream."><div className="space-y-4"><Toggle checked={config.show_reasoning} onChange={value => save({ show_reasoning: value })} label="Show Thinking blocks" /><Toggle checked={config.reasoning_expanded} onChange={value => save({ reasoning_expanded: value })} label="Expand Thinking blocks by default" /></div></Card></>;
 }
 
 function Model({ config, save, runtime }: { config: DesktopConfig; save: (patch: Partial<DesktopConfig>) => Promise<void>; runtime: RuntimeInfo | null }) {

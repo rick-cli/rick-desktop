@@ -839,13 +839,21 @@ input::placeholder { color: var(--muted-4); }
 .hint { margin-top: 6px; color: var(--muted-4); font-size: 9px; text-align: center; }
 .composer-statusbar { display: flex; height: 20px; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; padding: 0 2px; color: var(--muted-4); font-family: var(--font-mono); font-size: 10px; }
 .composer-statusbar-left { display: flex; min-width: 0; align-items: center; gap: 10px; white-space: nowrap; }
-.usage-status { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.usage-status { display: flex; align-items: center; gap: 12px; white-space: nowrap; font-size: 12px; }
 .usage-token { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-4); }
 .usage-token svg { color: var(--muted-5); }
 .usage-context { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-4); }
 .usage-context > svg { color: var(--primary); }
-.usage-context-bar { display: inline-block; width: 52px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--border); }
-.usage-context-fill { display: block; height: 100%; border-radius: 2px; background: var(--primary); }
+.usage-context-bar { display: inline-block; width: 60px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--border); }
+.usage-context-fill { display: block; height: 100%; border-radius: 3px; background: var(--primary); }
+/* With a custom background the chat surfaces are transparent, so give the
+   usage stats their own near-opaque chip to stay readable; it is 88% opaque
+   (the global scrim is 62%) so the image still tints through slightly. */
+.has-app-background .usage-status {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+}
 @media (max-width: 1100px) { .usage-context-bar { display: none; } }
 @media (max-width: 880px) { .usage-token-cached { display: none; } }
 @media (max-width: 720px) { .usage-context { display: none; } }

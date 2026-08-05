@@ -1124,20 +1124,14 @@ func (a *App) PickFolder() (string, error) {
 }
 
 // PickBackgroundFile opens the native file picker for a custom app background
-// and returns the selected path, or "" when the user cancels. kind selects
-// the media type filter ("image" or "video").
-func (a *App) PickBackgroundFile(kind string) (string, error) {
+// image and returns the selected path, or "" when the user cancels.
+func (a *App) PickBackgroundFile() (string, error) {
 	if a.ctx == nil {
 		return "", nil
 	}
 	filter := wailsruntime.FileFilter{DisplayName: "Image files", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp"}
-	title := "Select background image"
-	if kind == "video" {
-		filter = wailsruntime.FileFilter{DisplayName: "Video files", Pattern: "*.mp4;*.webm"}
-		title = "Select background video"
-	}
 	return wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
-		Title:   title,
+		Title:   "Select background image",
 		Filters: []wailsruntime.FileFilter{filter},
 	})
 }
@@ -1146,11 +1140,10 @@ func (a *App) PickBackgroundFile(kind string) (string, error) {
 // this are rejected with a clear message.
 const maxBackgroundBytes = 80 << 20 // 80 MB
 
-// backgroundHandler serves the configured custom background (image or video)
-// as a normal resource on the wails:// scheme. file:// paths are blocked
-// cross-origin and data: URLs are rejected for <video> in WebView2, so the
-// file must be streamed by the backend. http.ServeContent provides the Range
-// support <video> needs to seek and to read metadata.
+// backgroundHandler serves the configured custom background image as a normal
+// resource on the wails:// scheme. file:// paths are blocked cross-origin, so
+// the file must be streamed by the backend. http.ServeContent provides the
+// cache/range handling for <img>.
 func (a *App) backgroundHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/__background" {
@@ -1178,7 +1171,7 @@ func (a *App) backgroundHandler() http.Handler {
 			return
 		}
 		// http.ServeContent only sniffs the type when the header is unset;
-		// set it from the extension so <video> decodes instead of downloading.
+		// set it from the extension so images decode instead of downloading.
 		w.Header().Set("Content-Type", backgroundMime(value.BackgroundPath))
 		// Revalidate on every load so replacing the file or switching modes is
 		// picked up immediately; ServeContent turns that into cheap 304s.
@@ -1199,16 +1192,6 @@ func backgroundMime(path string) string {
 		return "image/webp"
 	case ".bmp":
 		return "image/bmp"
-	case ".mp4":
-		return "video/mp4"
-	case ".webm":
-		return "video/webm"
-	case ".mov":
-		return "video/quicktime"
-	case ".mkv":
-		return "video/x-matroska"
-	case ".avi":
-		return "video/x-msvideo"
 	default:
 		return "application/octet-stream"
 	}
