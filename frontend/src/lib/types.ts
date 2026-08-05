@@ -293,6 +293,7 @@ export interface DesktopConfig {
   workspace_path?: string;
   background_mode?: 'theme' | 'image';
   background_path?: string;
+  background_transparency?: number;
 }
 
 export interface AuthProvider {

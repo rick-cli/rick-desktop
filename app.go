@@ -38,9 +38,9 @@ type App struct {
 	// Short-lived caches that keep read-only protocol queries from spawning a
 	// fresh rickserve process on every keystroke/mount. Mutating actions
 	// bypass and invalidate them.
-	oneShotCache    map[string]oneShotCacheEntry
-	versionCache    cachedValue[string]
-	providersCache  cachedValue[[]Provider]
+	oneShotCache   map[string]oneShotCacheEntry
+	versionCache   cachedValue[string]
+	providersCache cachedValue[[]Provider]
 }
 
 type cachedValue[T any] struct {
@@ -912,8 +912,12 @@ func (a *App) GetSessionMessages(sessionID string) ([]ChatMessage, error) {
 }
 
 func (a *App) RenameSession(id, title string) error { return a.sessionStore.Rename(id, title) }
-func (a *App) SetSessionCategory(id, category string) error { return a.sessionStore.SetCategory(id, category) }
-func (a *App) SetSessionFavorite(id string, fav bool) error { return a.sessionStore.SetFavorite(id, fav) }
+func (a *App) SetSessionCategory(id, category string) error {
+	return a.sessionStore.SetCategory(id, category)
+}
+func (a *App) SetSessionFavorite(id string, fav bool) error {
+	return a.sessionStore.SetFavorite(id, fav)
+}
 func (a *App) DeleteSession(id string) error { return a.sessionStore.Delete(id) }
 func (a *App) ForkSession(id string) (Session, error) {
 	summary, err := a.sessionStore.Fork(id)
@@ -1027,14 +1031,17 @@ type DesktopConfig struct {
 	WorkspacePath       string `json:"workspace_path,omitempty"`
 	BackgroundMode      string `json:"background_mode,omitempty"`
 	BackgroundPath      string `json:"background_path,omitempty"`
+	// BackgroundTransparency is 0-100; higher means more of the image shows
+	// through the theme-tinted scrim.
+	BackgroundTransparency int `json:"background_transparency,omitempty"`
 }
 
 func toDesktopConfig(value domain.AppConfig) DesktopConfig {
-	return DesktopConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath}
+	return DesktopConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath, BackgroundTransparency: value.BackgroundTransparency}
 }
 
 func fromDesktopConfig(value DesktopConfig) domain.AppConfig {
-	return domain.AppConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath}
+	return domain.AppConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath, BackgroundTransparency: value.BackgroundTransparency}
 }
 
 func (a *App) GetConfig() (DesktopConfig, error) {

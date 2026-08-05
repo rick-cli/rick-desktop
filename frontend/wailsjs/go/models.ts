@@ -267,6 +267,7 @@ export namespace main {
 	    workspace_path?: string;
 	    background_mode?: string;
 	    background_path?: string;
+	    background_transparency?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new DesktopConfig(source);
@@ -289,6 +290,7 @@ export namespace main {
 	        this.workspace_path = source["workspace_path"];
 	        this.background_mode = source["background_mode"];
 	        this.background_path = source["background_path"];
+	        this.background_transparency = source["background_transparency"];
 	    }
 	}
 	export class Model {
