@@ -23,8 +23,6 @@ export function ForkSession(arg1:string):Promise<main.Session>;
 
 export function GetAuthStatus():Promise<Array<main.AuthProvider>>;
 
-export function GetBackgroundData():Promise<string>;
-
 export function GetCommandCatalog():Promise<Array<domain.CommandSpec>>;
 
 export function GetConfig():Promise<main.DesktopConfig>;

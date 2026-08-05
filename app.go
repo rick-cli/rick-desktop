@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1142,34 +1142,49 @@ func (a *App) PickBackgroundFile(kind string) (string, error) {
 	})
 }
 
-// maxBackgroundBytes keeps the in-memory data URL reasonable; background
-// media larger than this is rejected with a clear message.
+// maxBackgroundBytes keeps background media reasonable; files larger than
+// this are rejected with a clear message.
 const maxBackgroundBytes = 80 << 20 // 80 MB
 
-// GetBackgroundData returns the configured custom background (image or video)
-// as a data URL. A data URL sidesteps WebView2's file:// cross-origin
-// restriction on the wails:// scheme; plain file paths never render. Returns
-// "" when no custom background is configured.
-func (a *App) GetBackgroundData() (string, error) {
-	value, err := a.configStore.Load()
-	if err != nil {
-		return "", err
-	}
-	if value.BackgroundMode == "" || value.BackgroundMode == "theme" || strings.TrimSpace(value.BackgroundPath) == "" {
-		return "", nil
-	}
-	info, err := os.Stat(value.BackgroundPath)
-	if err != nil {
-		return "", fmt.Errorf("read background file: %w", err)
-	}
-	if info.Size() > maxBackgroundBytes {
-		return "", fmt.Errorf("background file is larger than 80 MB")
-	}
-	data, err := os.ReadFile(value.BackgroundPath)
-	if err != nil {
-		return "", fmt.Errorf("read background file: %w", err)
-	}
-	return "data:" + backgroundMime(value.BackgroundPath) + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+// backgroundHandler serves the configured custom background (image or video)
+// as a normal resource on the wails:// scheme. file:// paths are blocked
+// cross-origin and data: URLs are rejected for <video> in WebView2, so the
+// file must be streamed by the backend. http.ServeContent provides the Range
+// support <video> needs to seek and to read metadata.
+func (a *App) backgroundHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/__background" {
+			http.NotFound(w, r)
+			return
+		}
+		value, err := a.configStore.Load()
+		if err != nil || value.BackgroundMode == "" || value.BackgroundMode == "theme" || strings.TrimSpace(value.BackgroundPath) == "" {
+			http.NotFound(w, r)
+			return
+		}
+		file, err := os.Open(value.BackgroundPath)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if info.Size() > maxBackgroundBytes {
+			http.Error(w, "background file is larger than 80 MB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		// http.ServeContent only sniffs the type when the header is unset;
+		// set it from the extension so <video> decodes instead of downloading.
+		w.Header().Set("Content-Type", backgroundMime(value.BackgroundPath))
+		// Revalidate on every load so replacing the file or switching modes is
+		// picked up immediately; ServeContent turns that into cheap 304s.
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeContent(w, r, filepath.Base(value.BackgroundPath), info.ModTime(), file)
+	})
 }
 
 func backgroundMime(path string) string {

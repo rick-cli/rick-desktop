@@ -38,10 +38,6 @@ export function GetAuthStatus() {
   return window['go']['main']['App']['GetAuthStatus']();
 }
 
-export function GetBackgroundData() {
-  return window['go']['main']['App']['GetBackgroundData']();
-}
-
 export function GetCommandCatalog() {
   return window['go']['main']['App']['GetCommandCatalog']();
 }
