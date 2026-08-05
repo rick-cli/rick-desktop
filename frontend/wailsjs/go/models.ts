@@ -265,6 +265,8 @@ export namespace main {
 	    yolo: boolean;
 	    rickserve_path?: string;
 	    workspace_path?: string;
+	    background_mode?: string;
+	    background_path?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new DesktopConfig(source);
@@ -285,6 +287,8 @@ export namespace main {
 	        this.yolo = source["yolo"];
 	        this.rickserve_path = source["rickserve_path"];
 	        this.workspace_path = source["workspace_path"];
+	        this.background_mode = source["background_mode"];
+	        this.background_path = source["background_path"];
 	    }
 	}
 	export class Model {

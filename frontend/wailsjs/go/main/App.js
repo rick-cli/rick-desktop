@@ -38,6 +38,10 @@ export function GetAuthStatus() {
   return window['go']['main']['App']['GetAuthStatus']();
 }
 
+export function GetBackgroundData() {
+  return window['go']['main']['App']['GetBackgroundData']();
+}
+
 export function GetCommandCatalog() {
   return window['go']['main']['App']['GetCommandCatalog']();
 }
@@ -120,6 +124,10 @@ export function KillAgent(arg1, arg2) {
 
 export function ListAgents(arg1) {
   return window['go']['main']['App']['ListAgents'](arg1);
+}
+
+export function PickBackgroundFile(arg1) {
+  return window['go']['main']['App']['PickBackgroundFile'](arg1);
 }
 
 export function PickFolder() {

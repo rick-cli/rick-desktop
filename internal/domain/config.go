@@ -20,6 +20,8 @@ type AppConfig struct {
 	Yolo                bool           `json:"yolo"`
 	RickservePath       string         `json:"rickserve_path,omitempty"`
 	WorkspacePath       string         `json:"workspace_path,omitempty"`
+	BackgroundMode      string         `json:"background_mode,omitempty"`
+	BackgroundPath      string         `json:"background_path,omitempty"`
 	Unknown             map[string]any `json:"-"`
 }
 
@@ -35,5 +37,6 @@ func DefaultConfig() AppConfig {
 		MaxSwarmConcurrency: 4,
 		ThinkingMode:        "auto",
 		Yolo:                false,
+		BackgroundMode:      "theme",
 	}
 }

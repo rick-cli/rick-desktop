@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1024,14 +1025,16 @@ type DesktopConfig struct {
 	Yolo                bool   `json:"yolo"`
 	RickservePath       string `json:"rickserve_path,omitempty"`
 	WorkspacePath       string `json:"workspace_path,omitempty"`
+	BackgroundMode      string `json:"background_mode,omitempty"`
+	BackgroundPath      string `json:"background_path,omitempty"`
 }
 
 func toDesktopConfig(value domain.AppConfig) DesktopConfig {
-	return DesktopConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath}
+	return DesktopConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath}
 }
 
 func fromDesktopConfig(value DesktopConfig) domain.AppConfig {
-	return domain.AppConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath}
+	return domain.AppConfig{SchemaVersion: value.SchemaVersion, Model: value.Model, Theme: value.Theme, FontSize: value.FontSize, PermissionProfile: value.PermissionProfile, Sandbox: value.Sandbox, ShowReasoning: value.ShowReasoning, ReasoningExpanded: value.ReasoningExpanded, MaxSwarmConcurrency: value.MaxSwarmConcurrency, ThinkingMode: value.ThinkingMode, Yolo: value.Yolo, RickservePath: value.RickservePath, WorkspacePath: value.WorkspacePath, BackgroundMode: value.BackgroundMode, BackgroundPath: value.BackgroundPath}
 }
 
 func (a *App) GetConfig() (DesktopConfig, error) {
@@ -1118,6 +1121,82 @@ func (a *App) PickFolder() (string, error) {
 		return "", nil
 	}
 	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{Title: "Select workspace folder"})
+}
+
+// PickBackgroundFile opens the native file picker for a custom app background
+// and returns the selected path, or "" when the user cancels. kind selects
+// the media type filter ("image" or "video").
+func (a *App) PickBackgroundFile(kind string) (string, error) {
+	if a.ctx == nil {
+		return "", nil
+	}
+	filter := wailsruntime.FileFilter{DisplayName: "Image files", Pattern: "*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp"}
+	title := "Select background image"
+	if kind == "video" {
+		filter = wailsruntime.FileFilter{DisplayName: "Video files", Pattern: "*.mp4;*.webm"}
+		title = "Select background video"
+	}
+	return wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:   title,
+		Filters: []wailsruntime.FileFilter{filter},
+	})
+}
+
+// maxBackgroundBytes keeps the in-memory data URL reasonable; background
+// media larger than this is rejected with a clear message.
+const maxBackgroundBytes = 80 << 20 // 80 MB
+
+// GetBackgroundData returns the configured custom background (image or video)
+// as a data URL. A data URL sidesteps WebView2's file:// cross-origin
+// restriction on the wails:// scheme; plain file paths never render. Returns
+// "" when no custom background is configured.
+func (a *App) GetBackgroundData() (string, error) {
+	value, err := a.configStore.Load()
+	if err != nil {
+		return "", err
+	}
+	if value.BackgroundMode == "" || value.BackgroundMode == "theme" || strings.TrimSpace(value.BackgroundPath) == "" {
+		return "", nil
+	}
+	info, err := os.Stat(value.BackgroundPath)
+	if err != nil {
+		return "", fmt.Errorf("read background file: %w", err)
+	}
+	if info.Size() > maxBackgroundBytes {
+		return "", fmt.Errorf("background file is larger than 80 MB")
+	}
+	data, err := os.ReadFile(value.BackgroundPath)
+	if err != nil {
+		return "", fmt.Errorf("read background file: %w", err)
+	}
+	return "data:" + backgroundMime(value.BackgroundPath) + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
+func backgroundMime(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".mov":
+		return "video/quicktime"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".avi":
+		return "video/x-msvideo"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (a *App) desktopSettingsPath() string {

@@ -386,6 +386,49 @@ input::placeholder { color: var(--muted-4); }
   background: var(--sidebar);
 }
 
+.app-background {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.app-background-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-background-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--background) 62%, transparent);
+}
+
+/* With a custom background the root needs its own stacking context so the
+   negative-z media layer paints above the root's background but below all
+   app content. The chat surface, composer bar and header let the media show
+   through (the theme-tinted scrim keeps them readable); the sidebar stays
+   nearly opaque so session text remains legible. */
+.has-app-background {
+  position: relative;
+  z-index: 0;
+}
+
+.has-app-background .app-shell,
+.has-app-background .header,
+.has-app-background .reference-chat,
+.has-app-background .codex-composer-shell {
+  background: transparent;
+}
+
+.has-app-background .reference-sidebar {
+  background: color-mix(in srgb, var(--sidebar) 88%, transparent);
+}
+
 .brand {
   display: flex;
   min-height: 52px;

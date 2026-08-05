@@ -291,6 +291,8 @@ export interface DesktopConfig {
   yolo: boolean;
   rickserve_path?: string;
   workspace_path?: string;
+  background_mode?: 'theme' | 'image' | 'video';
+  background_path?: string;
 }
 
 export interface AuthProvider {

@@ -23,6 +23,8 @@ export function ForkSession(arg1:string):Promise<main.Session>;
 
 export function GetAuthStatus():Promise<Array<main.AuthProvider>>;
 
+export function GetBackgroundData():Promise<string>;
+
 export function GetCommandCatalog():Promise<Array<domain.CommandSpec>>;
 
 export function GetConfig():Promise<main.DesktopConfig>;
@@ -64,6 +66,8 @@ export function InstallUpdate():Promise<void>;
 export function KillAgent(arg1:string,arg2:string):Promise<void>;
 
 export function ListAgents(arg1:string):Promise<void>;
+
+export function PickBackgroundFile(arg1:string):Promise<string>;
 
 export function PickFolder():Promise<string>;
 

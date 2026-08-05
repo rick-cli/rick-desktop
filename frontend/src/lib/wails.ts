@@ -214,6 +214,14 @@ export async function pickFolder(): Promise<string> {
   return (await app()?.PickFolder()) || '';
 }
 
+export async function pickBackgroundFile(kind: string): Promise<string> {
+  return (await app()?.PickBackgroundFile(kind)) || '';
+}
+
+export async function getBackgroundData(): Promise<string> {
+  return (await app()?.GetBackgroundData()) || '';
+}
+
 export function onRickEvent(callback: (event: RickEvent) => void): () => void {
   if (!window.runtime) return () => {};
   return window.runtime.EventsOn('rick:event', callback);
