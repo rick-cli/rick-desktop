@@ -1,6 +1,7 @@
-# Rick Desktop
+<img width="1917" height="1004" alt="grafik" src="https://github.com/user-attachments/assets/77575391-2b09-4a26-804e-ca9469ff6cd3" /># Rick Desktop
 
 A visual desktop workspace for the [rick](https://github.com/rick-cli/rick) AI coding agent. Rick Desktop drives the `rick` CLI through a local chat, live tool timeline, session manager, and settings — no terminal required.
+![Uploading grafik.png…]()
 
 ## Features
 
