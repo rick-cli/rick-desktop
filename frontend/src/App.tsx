@@ -1,5 +1,7 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ArrowDownToLine, ArrowLeft, ArrowUp, ArrowUpFromLine, Bot, BrainCircuit, ChartColumnBig, Check, ChevronDown, CircleStop, Command, Cpu, Database, FileText, Gauge, Layers3, ListChecks, Palette, Paperclip, Redo2, RefreshCw, Search, Settings2, ShieldCheck, Target, Undo2, UsersRound, Wrench, X, Zap } from 'lucide-react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Activity, ArrowDownToLine, ArrowLeft, ArrowUp, ArrowUpFromLine, Bot, BrainCircuit, ChartColumnBig, Check, ChevronDown, ChevronRight, CircleStop, Command, Cpu, Database, FileText, Gauge, Layers3, ListChecks, Loader2, Palette, Paperclip, Redo2, RefreshCw, Search, Settings2, ShieldCheck, Target, Undo2, UsersRound, Wrench, X, Zap } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { UsageInsights } from './components/UsageInsights';
 import { useNotifications } from './components/Notifications';
@@ -10,8 +12,10 @@ import { addSystemMessage, addUserMessage, accumulateUsage, hydrateMessages, ini
 import { commandSuggestions, applySuggestion, CommandSuggestion } from './lib/commands';
 import { collectContextFiles } from './lib/workspace';
 import { buildRunOptions } from './lib/runOptions';
+import { ChatScrollState, nextChatScroll } from './lib/chatScroll';
+import { isEventForActiveRun, isEventForViewedSession, normalizePersistedTimeline, restoreLiveSession, shouldHydrateCompletedRun, shouldPublishHistory, shouldPublishUsage, shouldStashViewedTimeline, shouldUsePersistedTimeline } from './lib/sessionSwitch';
 import { Attachment, CommandSpec, DailyUsage, DesktopConfig, Goal, PermissionRequest, Provider, ResolvedConfig, RickStatus, RuntimeInfo, Session, SwarmActivity, TimelineBlock, TimelineMessage, TimelineState, UpdateInfo, Usage, UsageStats } from './lib/types';
-import { executeRickCommand, deleteSession, exportSession, exportSettings, forkSession, getCommandCatalog, getConfig, getDefaultModel, getProviders, getResolvedConfig, getRickStatus, getRuntimeInfo, getSessionMessages, getSessions, getUpdateStatus, getUsageDaily, getUsageStats, importSettings, installRick, installUpdate, onRickError, onRickEvent, onRickStatus, onUpdateAvailable, pickBackgroundFile, pickFolder, renameSession, requestCompact, requestGoals, requestSnapshot, resetSettings, respondPermission, runPrompt, searchSessions, setSessionCategory, setSessionFavorite, stopRun, updateConfig } from './lib/wails';
+import { deleteDesktopTimeline, executeRickCommand, deleteSession, exportSession, exportSettings, forkSession, getCommandCatalog, getConfig, getDefaultModel, getProviders, getResolvedConfig, getRickStatus, getRuntimeInfo, getSessionMessages, getSessions, getUpdateStatus, getUsageDaily, getUsageStats, importSettings, installRick, installUpdate, loadDesktopTimeline, onRickError, onRickEvent, onRickStatus, onUpdateAvailable, pickBackgroundFile, pickFolder, renameSession, requestCompact, requestGoals, requestSnapshot, resetSettings, respondPermission, runPrompt, saveDesktopTimeline, searchSessions, setSessionCategory, setSessionFavorite, stopRun, updateConfig } from './lib/wails';
 
 function applyTheme(theme: DesktopConfig['theme']) {
   const normalized = theme === 'dark' ? 'graphite' : theme;
@@ -25,9 +29,13 @@ export default function App() {
   const { confirm, prompt, toast } = useNotifications();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const sessionsRef = useRef<Session[]>([]);
+  sessionsRef.current = sessions;
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [currentModel, setCurrentModel] = useState('');
   const [timeline, setTimeline] = useState<TimelineState>(initialTimelineState);
+  const timelineRef = useRef<TimelineState>(initialTimelineState);
+  timelineRef.current = timeline;
   // In-progress timelines for sessions running in the background while the
   // user views another thread, keyed by session id. Switching threads mid-run
   // keeps the live tool/swarm blocks the disk store does not persist.
@@ -41,8 +49,12 @@ export default function App() {
   // The session currently being viewed, updated synchronously (not on render)
   // so event routing never races with React's commit of a selection change.
   const viewedSessionIdRef = useRef<string>('');
+  const unsuccessfulSessionsRef = useRef<Set<string>>(new Set());
   const [showReasoning, setShowReasoning] = useState(true);
+  const [reasoningExpanded, setReasoningExpanded] = useState(true);
   const [desktopConfig, setDesktopConfig] = useState<DesktopConfig | null>(null);
+  const desktopConfigRef = useRef<DesktopConfig | null>(null);
+  desktopConfigRef.current = desktopConfig;
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [liveUsage, setLiveUsage] = useState<Usage | null>(null);
   const [commandCatalog, setCommandCatalog] = useState<CommandSpec[]>([]);
@@ -55,6 +67,53 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [installingRick, setInstallingRick] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const timelineSaveTimersRef = useRef<Map<string, number>>(new Map());
+  const pendingTimelineSavesRef = useRef<Map<string, TimelineState>>(new Map());
+
+  const persistTimeline = useCallback((sessionId: string, state: TimelineState, immediate = false) => {
+    if (!sessionId) return;
+    const timers = timelineSaveTimersRef.current;
+    pendingTimelineSavesRef.current.set(sessionId, state);
+    const existing = timers.get(sessionId);
+    if (existing !== undefined) window.clearTimeout(existing);
+    const save = () => {
+      timers.delete(sessionId);
+      const pendingState = pendingTimelineSavesRef.current.get(sessionId) || state;
+      pendingTimelineSavesRef.current.delete(sessionId);
+      const selected = selectedSessionRef.current;
+      const session = selected?.id === sessionId ? selected : sessionsRef.current.find(candidate => candidate.id === sessionId);
+      saveDesktopTimeline(sessionId, pendingState, session).catch(() => {});
+    };
+    if (immediate) save();
+    else timers.set(sessionId, window.setTimeout(save, 80));
+  }, []);
+
+  const clearPersistedTimeline = useCallback((sessionId: string) => {
+    const timer = timelineSaveTimersRef.current.get(sessionId);
+    if (timer !== undefined) window.clearTimeout(timer);
+    timelineSaveTimersRef.current.delete(sessionId);
+    pendingTimelineSavesRef.current.delete(sessionId);
+    return deleteDesktopTimeline(sessionId);
+  }, []);
+
+  useEffect(() => {
+    const flushPendingTimelines = () => {
+      for (const timer of timelineSaveTimersRef.current.values()) window.clearTimeout(timer);
+      timelineSaveTimersRef.current.clear();
+      for (const [sessionId, state] of pendingTimelineSavesRef.current) {
+        const selected = selectedSessionRef.current;
+        const session = selected?.id === sessionId ? selected : sessionsRef.current.find(candidate => candidate.id === sessionId);
+        saveDesktopTimeline(sessionId, state, session).catch(() => {});
+      }
+      pendingTimelineSavesRef.current.clear();
+    };
+    window.addEventListener('beforeunload', flushPendingTimelines);
+    return () => {
+      window.removeEventListener('beforeunload', flushPendingTimelines);
+      flushPendingTimelines();
+    };
+  }, []);
 
   const contextFiles = useMemo(() => collectContextFiles(timeline.messages), [timeline.messages]);
   const visible = useMemo(() => visibleMessages(timeline.messages), [timeline.messages]);
@@ -66,6 +125,15 @@ export default function App() {
     return providers.find(provider => provider.name === providerName)?.models.find(model => model.id === modelId) || null;
   }, [providers, currentModel]);
 
+  const thinkingOptions = useMemo(() => {
+    const advertised = selectedModel?.reasoning_efforts;
+    const efforts = advertised !== undefined ? advertised : ['off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    return ['auto', ...efforts.filter(value => value !== 'auto')].map(value => ({
+      value,
+      label: value === 'xhigh' ? 'XHigh' : value.charAt(0).toUpperCase() + value.slice(1),
+    }));
+  }, [selectedModel]);
+
   const sessionTokens = useMemo<SessionTokens>(() => {
     const base = usageStats?.session;
     const live = liveUsage;
@@ -76,16 +144,12 @@ export default function App() {
     };
   }, [usageStats, liveUsage]);
 
-  const contextUsage = useMemo(() => {
-    const input = sessionTokens.input;
-    const cached = sessionTokens.cached;
-    return {
-      used: usageStats?.context_used || (input + cached),
-      // The model's own context window wins, exactly like the TUI reads it
-      // from the model info; the backend and event limits are fallbacks.
-      limit: selectedModel?.context_window || usageStats?.context_limit || liveUsage?.context_limit || 0,
-    };
-  }, [sessionTokens, usageStats, selectedModel, liveUsage]);
+  const contextUsage = useMemo(() => ({
+    used: liveUsage?.context_tokens ?? usageStats?.context_used ?? 0,
+    // Live daemon metadata wins during a run; persisted/model metadata restores
+    // the gauge when an existing session is selected.
+    limit: liveUsage?.context_limit || selectedModel?.context_window || usageStats?.context_limit || 0,
+  }), [usageStats, selectedModel, liveUsage]);
 
   const refreshSessions = useCallback(() => getSessions().then(value => {
     const list = value || [];
@@ -94,22 +158,66 @@ export default function App() {
     // once the daemon has saved it, without losing the selection.
     setSelectedSession(current => current ? list.find(session => session.id === current.id) || current : current);
   }).catch(() => {}), []);
-  const refreshUsage = useCallback(() => getUsageStats(selectedSession?.id || '', currentModel).then(value => { setUsageStats(value); setLiveUsage(null); }).catch(() => {}), [currentModel, selectedSession?.id]);
+  const refreshUsage = useCallback((sessionId = '', model = currentModel, clearLive = false) => {
+    // Monotonic sequence: only the most recently issued read may publish
+    // stats, so a slow getUsageStats from a session/model the user already
+    // switched away from can never clobber the current one mid-chat.
+    const requestSeq = ++usageRequestRef.current;
+    getUsageStats(sessionId, model).then(value => {
+      if (usageRequestRef.current !== requestSeq || !shouldPublishUsage(sessionId, viewedSessionIdRef.current)) return;
+      setUsageStats(value);
+      if (clearLive && sessionId === viewedSessionIdRef.current && !runningSessionsRef.current[sessionId]) {
+        setLiveUsage(null);
+      }
+    }).catch(() => {});
+  }, [currentModel]);
   const usageTimer = useRef<number | undefined>(undefined);
-  const refreshUsageSoon = useCallback(() => {
+  const usageRequestRef = useRef(0);
+  const refreshUsageSoon = useCallback((sessionId: string, model: string) => {
     if (usageTimer.current !== undefined) window.clearTimeout(usageTimer.current);
-    usageTimer.current = window.setTimeout(() => { refreshUsage(); }, 1500);
+    usageTimer.current = window.setTimeout(() => { refreshUsage(sessionId, model, true); }, 1500);
   }, [refreshUsage]);
+  const beginLiveRun = useCallback((sessionId: string) => {
+    if (usageTimer.current !== undefined) {
+      window.clearTimeout(usageTimer.current);
+      usageTimer.current = undefined;
+    }
+    usageRequestRef.current++;
+    unsuccessfulSessionsRef.current.delete(sessionId);
+    setLiveUsage(null);
+  }, []);
+  const failRunStart = useCallback((sessionId: string, runId: string, message: string) => {
+    const current = sessionId === viewedSessionIdRef.current
+      ? timelineRef.current
+      : backgroundTimelinesRef.current.get(sessionId);
+    if (!current || current.activeRunId !== runId) return;
+    const nextTimeline = reduceRickEvent(current, { type: 'error', run_id: runId, error: message });
+    unsuccessfulSessionsRef.current.add(sessionId);
+    const running = { ...runningSessionsRef.current };
+    delete running[sessionId];
+    runningSessionsRef.current = running;
+    setRunningSessions(running);
+    persistTimeline(sessionId, nextTimeline, true);
+    if (sessionId === viewedSessionIdRef.current) {
+      timelineRef.current = nextTimeline;
+      setTimeline(nextTimeline);
+      setError(message);
+    } else {
+      backgroundTimelinesRef.current.set(sessionId, nextTimeline);
+    }
+  }, [persistTimeline]);
   const patchConfig = useCallback((patch: Partial<DesktopConfig>) => {
-    if (!desktopConfig) return;
-    const next = { ...desktopConfig, ...patch };
+    const current = desktopConfigRef.current;
+    if (!current) return;
+    const next = { ...current, ...patch };
+    desktopConfigRef.current = next;
     setDesktopConfig(next);
     if (patch.theme) {
       applyTheme(patch.theme);
       if (patch.theme !== 'light') lastDarkTheme = patch.theme;
     }
     updateConfig(next).catch(cause => setError(cause instanceof Error ? cause.message : 'Failed to save settings'));
-  }, [desktopConfig]);
+  }, []);
 
   useEffect(() => {
     Promise.all([getProviders().catch(() => []), getSessions().catch(() => []), getDefaultModel().catch(() => ''), getCommandCatalog().catch(() => []), getConfig().catch(() => null)])
@@ -119,8 +227,10 @@ export default function App() {
         setCurrentModel(modelValue || '');
         setCommandCatalog(commandValue || []);
         if (config) {
+          desktopConfigRef.current = config;
           setDesktopConfig(config);
           setShowReasoning(config.show_reasoning);
+          setReasoningExpanded(config.reasoning_expanded);
           applyTheme(config.theme);
           if (config.theme !== 'light') lastDarkTheme = config.theme;
           getUsageStats('', modelValue || '').then(setUsageStats).catch(() => {});
@@ -131,8 +241,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (initStatus === 'ready') refreshUsage();
-  }, [initStatus, refreshUsage]);
+    if (initStatus === 'ready') refreshUsage(selectedSessionRef.current?.id || '', selectedSessionRef.current?.model || currentModel);
+  }, [currentModel, initStatus, refreshUsage]);
 
   // Rick CLI availability drives the setup screen; the single startup update
   // check drives the manual update button in the header. Both also refresh
@@ -179,32 +289,49 @@ export default function App() {
       const oldestSession = cache.keys().next().value;
       if (oldestSession !== undefined) cache.delete(oldestSession);
     }
-    setTimeline(current => (current.loading && current.messages.length > 0 ? current : { ...initialTimelineState, messages: hydrated }));
+    const isRunning = Boolean(runningSessionsRef.current[sessionId]);
+    if (!isRunning) backgroundTimelinesRef.current.delete(sessionId);
+    if (!shouldPublishHistory(sessionId, viewedSessionIdRef.current, isRunning)) return;
+    const next = { ...initialTimelineState, messages: hydrated };
+    timelineRef.current = next;
+    setTimeline(next);
   }, []);
 
   useEffect(() => {
     const unsubscribeEvent = onRickEvent((event) => {
       const sid = event.session_id || '';
       const kind = event.kind || event.event || event.type;
-      const isTerminal = kind === 'run.completed' || kind === 'run.cancelled' || event.type === 'done';
+      const isTerminal = kind === 'run.completed' || kind === 'run.failed' || kind === 'run.cancelled'
+        || event.type === 'done' || event.type === 'error' || event.type === 'cancelled';
       if (event.type === 'agents') {
         // The daemon reports live agent state on request; the desktop UI has
         // no live-agents frame, so these events carry nothing to render.
         return;
       }
-      // Route events to the timeline of the session being viewed. A run in
-      // any other thread must never bleed into the thread on screen.
-      if (sid && sid !== viewedSessionIdRef.current) {
+      const isViewed = isEventForViewedSession(sid, viewedSessionIdRef.current);
+      const routedTimeline = isViewed ? timelineRef.current : backgroundTimelinesRef.current.get(sid);
+      if (!isEventForActiveRun(event.run_id, routedTimeline?.activeRunId)) return;
+      if (!isViewed) {
         const current = backgroundTimelinesRef.current.get(sid) || initialTimelineState;
-        backgroundTimelinesRef.current.set(sid, reduceRickEvent(current, event));
+        const next = reduceRickEvent(current, event);
+        backgroundTimelinesRef.current.set(sid, next);
+        persistTimeline(sid, next);
       } else {
-        setTimeline(current => reduceRickEvent(current, event));
+        setTimeline(current => {
+          const next = reduceRickEvent(current, event);
+          timelineRef.current = next;
+          persistTimeline(sid || viewedSessionIdRef.current, next);
+          return next;
+        });
         if (kind === 'usage') {
           // Usage events are per-call deltas: accumulate them into the live
           // display and only re-read persisted totals when the run completes,
           // so the numbers never bounce between stale disk state and live sums.
           setLiveUsage(current => accumulateUsage(current ?? undefined, event.usage || parseUsage(event.data)) ?? null);
         }
+      }
+      if (sid && (kind === 'run.failed' || kind === 'run.cancelled' || event.type === 'error' || event.type === 'cancelled')) {
+        unsuccessfulSessionsRef.current.add(sid);
       }
       if (isTerminal) {
         if (sid) {
@@ -216,12 +343,31 @@ export default function App() {
           setRunningSessions(next);
         }
         refreshSessions();
-        if (!sid || sid === viewedSessionIdRef.current) refreshUsageSoon();
+        if (!sid || sid === viewedSessionIdRef.current) {
+          refreshUsageSoon(sid || viewedSessionIdRef.current, selectedSessionRef.current?.model || currentModel);
+        }
+        if (sid && event.type === 'done') {
+          const unsuccessful = unsuccessfulSessionsRef.current.delete(sid);
+          if (unsuccessful && isViewed) {
+            setTimeline(current => {
+              backgroundTimelinesRef.current.set(sid, current);
+              return current;
+            });
+          } else if (shouldHydrateCompletedRun(event.type || '', unsuccessful)) {
+            getSessionMessages(sid).then(messages => {
+              const hydrated = hydrateMessages(messages || []);
+              backgroundTimelinesRef.current.delete(sid);
+              applyHistory(sid, hydrated);
+              void clearPersistedTimeline(sid).catch(() => {});
+              if (sid === viewedSessionIdRef.current) setLiveUsage(null);
+            }).catch(() => {});
+          }
+        }
       }
     });
     const unsubscribeError = onRickError((event) => setError(event.error || 'Rick reported an error'));
     return () => { unsubscribeEvent(); unsubscribeError(); };
-  }, [refreshSessions, refreshUsageSoon]);
+  }, [applyHistory, clearPersistedTimeline, currentModel, persistTimeline, refreshSessions, refreshUsageSoon]);
 
   // Refocusing the window pulls in sessions/messages created by the Rick CLI
   // in the same shared session store, so history stays in sync both ways.
@@ -261,24 +407,32 @@ export default function App() {
   }, [refreshSessions]);
 
   const handleStop = useCallback(async () => {
-    // Optimistically stop the UI immediately; the daemon reports the
-    // definitive cancelled/done state on the stream.
-    setTimeline(current => reduceRickEvent(current, { type: 'cancelled' }));
-    try { await stopRun(viewedSessionIdRef.current || ''); } catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to stop Rick'); }
+    const sessionId = viewedSessionIdRef.current || '';
+    const runId = timelineRef.current.activeRunId;
+    try { await stopRun(sessionId, runId); } catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to stop Rick'); }
   }, []);
 
   const handleNewChat = useCallback(() => {
     // Reset the view only: each thread owns its own timeline now, so runs in
     // other sessions keep streaming and can be resumed from the sidebar.
-    viewedSessionIdRef.current = '';
-    setSelectedSession(null);
+    const previousSessionId = viewedSessionIdRef.current;
+    const previousTimeline = timelineRef.current;
+    if (previousSessionId && runningSessionsRef.current[previousSessionId]) {
+      backgroundTimelinesRef.current.set(previousSessionId, previousTimeline);
+      persistTimeline(previousSessionId, previousTimeline, true);
+    }
+    timelineRef.current = initialTimelineState;
     setTimeline(initialTimelineState);
+    viewedSessionIdRef.current = '';
+    selectedSessionRef.current = null;
+    setSelectedSession(null);
     setLiveUsage(null);
     setError(undefined);
-  }, []);
+  }, [persistTimeline]);
 
   const handleSend = useCallback(async (text: string, attachments: Attachment[] = []) => {
     if (timeline.loading) return;
+    const runConfig = desktopConfigRef.current;
     const slashMatch = text.match(/^\/([^\s]+)/);
     const command = slashMatch?.[1]?.toLowerCase();
     const rest = slashMatch ? text.slice(slashMatch[0].length).trim() : text;
@@ -313,11 +467,11 @@ export default function App() {
       models: async () => { setProviders(await getProviders().catch(() => [])); },
       model: () => setTimeline(current => addSystemMessage(current, `model: ${currentModel}`)),
       agent: () => { const value = rest.split(/\s+/)[0]; if (['build', 'general', 'explore'].includes(value)) setAgentType(value); },
-      thinking: () => { const value = rest.split(/\s+/)[0]; if (['auto', 'off', 'low', 'medium', 'high'].includes(value)) patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] }); },
+      thinking: () => { const value = rest.split(/\s+/)[0]; if (['auto', 'off', 'on', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value)) patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] }); },
       permissions: () => { const value = rest.split(/\s+/)[0]; if (['readonly', 'standard', 'trusted', 'ci'].includes(value)) patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] }); },
       permission: () => { const value = rest.split(/\s+/)[0]; if (['readonly', 'standard', 'trusted', 'ci'].includes(value)) patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] }); },
       sandbox: () => { const value = rest.split(/\s+/)[0]; if (['read-only', 'workspace-write', 'trusted', 'off'].includes(value)) patchConfig({ sandbox: value as DesktopConfig['sandbox'] }); },
-      yolo: () => patchConfig({ yolo: !(desktopConfig?.yolo || false) }),
+      yolo: () => patchConfig({ yolo: !(desktopConfigRef.current?.yolo || false) }),
       theme: () => { const value = rest.split(/\s+/)[0]; if (['charcoal', 'graphite', 'midnight', 'dracula', 'nord', 'gruvbox', 'github-dark', 'tokyo-night', 'catppuccin', 'one-dark', 'solarized-dark', 'light', 'system'].includes(value)) { patchConfig({ theme: value as DesktopConfig['theme'] }); applyTheme(value as DesktopConfig['theme']); } },
       tools: () => setShowSettings(true),
       mcp: () => setShowSettings(true),
@@ -332,6 +486,7 @@ export default function App() {
       fork: async () => {
         const id = rest.split(/\s+/)[0];
         if (!id) { setTimeline(current => addSystemMessage(current, 'usage: /fork <session-id>')); return; }
+        if (runningSessionsRef.current[id]) { setError('Stop the running session before forking it.'); return; }
         const fork = await forkSession(id);
         if (fork) { await refreshSessions(); setSelectedSession(fork); setTimeline(current => addSystemMessage(current, `forked: ${fork.title}`)); }
       },
@@ -339,17 +494,20 @@ export default function App() {
         const [id, ...titleParts] = rest.split(/\s+/);
         const title = titleParts.join(' ');
         if (!id || !title) { setTimeline(current => addSystemMessage(current, 'usage: /rename <session-id> <title>')); return; }
+        if (runningSessionsRef.current[id]) { setError('Stop the running session before renaming it.'); return; }
         await renameSession(id, title); await refreshSessions();
         setTimeline(current => addSystemMessage(current, `renamed ${id} → ${title}`));
       },
       category: async () => {
         const [id, ...categoryParts] = rest.split(/\s+/);
         if (!id) { setTimeline(current => addSystemMessage(current, 'usage: /category <session-id> [category]')); return; }
+        if (runningSessionsRef.current[id]) { setError('Stop the running session before changing its category.'); return; }
         await setSessionCategory(id, categoryParts.join(' ')); await refreshSessions();
       },
       favorite: async () => {
         const id = rest.split(/\s+/)[0];
         if (!id) { setTimeline(current => addSystemMessage(current, 'usage: /favorite <session-id>')); return; }
+        if (runningSessionsRef.current[id]) { setError('Stop the running session before changing its favorite state.'); return; }
         const target = sessions.find(session => session.id === id);
         await setSessionFavorite(id, !(target?.favorite));
         await refreshSessions();
@@ -358,17 +516,28 @@ export default function App() {
         const prompt = rest || text;
         const existingSession = selectedSession;
         const sessionId = existingSession?.id || `desk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        beginLiveRun(sessionId);
         viewedSessionIdRef.current = sessionId;
         if (!existingSession) {
           const now = new Date().toISOString();
-          setSessions(current => [{ id: sessionId, title: prompt.slice(0, 60) || 'New thread', cwd: desktopConfig?.workspace_path || '', model: currentModel, messages: 0, created: now, updated: now }, ...current]);
-          setSelectedSession({ id: sessionId, title: prompt.slice(0, 60) || 'New thread', cwd: desktopConfig?.workspace_path || '', model: currentModel, messages: 0, created: now, updated: now });
+          const placeholder: Session = { id: sessionId, title: prompt.slice(0, 60) || 'New thread', cwd: runConfig?.workspace_path || '', model: currentModel, messages: 0, created: now, updated: now };
+          selectedSessionRef.current = placeholder;
+          setSessions(current => [placeholder, ...current]);
+          setSelectedSession(placeholder);
         }
         setRunningSessions(current => ({ ...current, [sessionId]: true }));
         runningSessionsRef.current = { ...runningSessionsRef.current, [sessionId]: true };
         setError(undefined);
-        setTimeline(current => addUserMessage(current, prompt, attachments.map(att => ({ name: att.name, media_type: att.media_type, size: att.size }))));
-        await runPrompt(prompt, currentModel, sessionId, buildRunOptions(desktopConfig, agentType, attachments, existingSession?.cwd || desktopConfig?.workspace_path));
+        const nextTimeline = { ...addUserMessage(timelineRef.current, prompt, attachments.map(att => ({ name: att.name, media_type: att.media_type, size: att.size }))), activeRunId: runId, loading: true, error: undefined };
+        timelineRef.current = nextTimeline;
+        persistTimeline(sessionId, nextTimeline, true);
+        setTimeline(nextTimeline);
+        try {
+          await runPrompt(prompt, currentModel, sessionId, { ...buildRunOptions(runConfig, agentType, attachments, existingSession?.cwd || runConfig?.workspace_path), run_id: runId });
+        } catch (cause: unknown) {
+          failRunStart(sessionId, runId, cause instanceof Error ? cause.message : 'Failed to start Rick');
+        }
       },
     };
     if (native[command!]) {
@@ -392,6 +561,8 @@ export default function App() {
     // message is sent (the daemon only persists it when the run completes).
     const existingSession = selectedSession;
     const sessionId = existingSession?.id || `desk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    beginLiveRun(sessionId);
     // Synchronous: the just-dispatched run's first events can arrive before
     // React commits the placeholder selection, so route by this ref.
     viewedSessionIdRef.current = sessionId;
@@ -400,49 +571,102 @@ export default function App() {
       const placeholder: Session = {
         id: sessionId,
         title: text.slice(0, 60) || 'New thread',
-        cwd: desktopConfig?.workspace_path || '',
+        cwd: runConfig?.workspace_path || '',
         model: currentModel,
         messages: 0,
         created: now,
         updated: now,
       };
+      selectedSessionRef.current = placeholder;
       setSessions(current => [placeholder, ...current]);
       setSelectedSession(placeholder);
     }
     setRunningSessions(current => ({ ...current, [sessionId]: true }));
     runningSessionsRef.current = { ...runningSessionsRef.current, [sessionId]: true };
     setError(undefined);
-    setTimeline(current => addUserMessage(current, text, attachments.map(att => ({ name: att.name, media_type: att.media_type, size: att.size }))));
+    // Optimistically mark the run as in-progress. The daemon never emits a
+    // run.started event, so without this the composer shows nothing active
+    // (Send stays enabled, no caret) until the first streamed token — which on
+    // a fresh thread makes the send look broken.
+    const nextTimeline = { ...addUserMessage(timelineRef.current, text, attachments.map(att => ({ name: att.name, media_type: att.media_type, size: att.size }))), activeRunId: runId, loading: true, error: undefined };
+    timelineRef.current = nextTimeline;
+    persistTimeline(sessionId, nextTimeline, true);
+    setTimeline(nextTimeline);
     try {
-      await runPrompt(text, currentModel, sessionId, buildRunOptions(desktopConfig, agentType, attachments, existingSession?.cwd || desktopConfig?.workspace_path));
+      await runPrompt(text, currentModel, sessionId, { ...buildRunOptions(runConfig, agentType, attachments, existingSession?.cwd || runConfig?.workspace_path), run_id: runId });
     } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : 'Failed to start Rick');
-      setTimeline(current => reduceRickEvent(current, { type: 'error', error: cause instanceof Error ? cause.message : 'Failed to start Rick' }));
+      const message = cause instanceof Error ? cause.message : 'Failed to start Rick';
+      failRunStart(sessionId, runId, message);
     }
-  }, [agentType, commandCatalog, confirm, currentModel, desktopConfig?.yolo, handleNewChat, handleStop, handleUndoRedo, patchConfig, refreshSessions, selectedSession, sessions, setShowSettings, timeline.loading]);
+  }, [agentType, beginLiveRun, commandCatalog, confirm, currentModel, failRunStart, handleNewChat, handleStop, handleUndoRedo, patchConfig, persistTimeline, refreshSessions, selectedSession, sessions, setShowSettings, timeline.loading]);
 
 
   const handleSelectSession = useCallback(async (session: Session) => {
-    // Stash the currently viewed in-progress timeline before switching so its
-    // live tool/swarm blocks are not lost when coming back to it.
-    setTimeline(current => {
-      const previous = selectedSessionRef.current;
-      if (previous && previous.id !== session.id) backgroundTimelinesRef.current.set(previous.id, current);
-      return current;
-    });
+    // Snapshot the currently viewed state synchronously. Depending on a React
+    // state updater here lost brand-new prompts when the user switched chats
+    // before the selection render committed.
+    const previous = selectedSessionRef.current;
+    const previousTimeline = timelineRef.current;
+    if (previous && shouldStashViewedTimeline(
+      previous.id,
+      session.id,
+      Boolean(runningSessionsRef.current[previous.id]),
+      backgroundTimelinesRef.current.has(previous.id),
+    )) {
+      backgroundTimelinesRef.current.set(previous.id, previousTimeline);
+      persistTimeline(previous.id, previousTimeline, true);
+    }
+    if (usageTimer.current !== undefined) {
+      window.clearTimeout(usageTimer.current);
+      usageTimer.current = undefined;
+    }
+    usageRequestRef.current++;
+    selectedSessionRef.current = session;
     setSelectedSession(session);
+    if (session.model) setCurrentModel(session.model);
     // Synchronous: route this session's events to the main timeline before
     // React commits the new selection.
     viewedSessionIdRef.current = session.id;
+    setUsageStats(null);
+    refreshUsage(session.id, session.model || currentModel);
+    const live = restoreLiveSession(backgroundTimelinesRef.current, session.id);
+    if (live) {
+      setLiveUsage(live.usage);
+      timelineRef.current = live.timeline;
+      setTimeline(live.timeline);
+      return;
+    }
     setLiveUsage(null);
-    refreshUsage();
-    const live = backgroundTimelinesRef.current.get(session.id);
-    if (live) { setTimeline(live); return; }
     const cached = sessionMessagesCache.current.get(session.id);
-    setTimeline({ ...initialTimelineState, messages: cached || [] });
-    const history = await getSessionMessages(session.id).catch(() => []);
-    applyHistory(session.id, hydrateMessages(history || []));
-  }, [applyHistory, refreshUsage]);
+    const loadingState = { ...initialTimelineState, messages: cached || [] };
+    timelineRef.current = loadingState;
+    setTimeline(loadingState);
+
+    const [persisted, history] = await Promise.all([
+      loadDesktopTimeline(session.id).catch(() => null),
+      getSessionMessages(session.id).catch(() => []),
+    ]);
+    if (viewedSessionIdRef.current !== session.id) return;
+    const hydrated = hydrateMessages(history || []);
+    const knownRunning = Boolean(runningSessionsRef.current[session.id]);
+    const persistedTimeline = persisted?.timeline || null;
+    const persistedIsCurrent = !persisted?.session?.updated || !session.updated || persisted.session.updated >= session.updated;
+    if (shouldUsePersistedTimeline(persistedTimeline, hydrated.length, knownRunning, persistedIsCurrent) && persistedTimeline) {
+      const restored = normalizePersistedTimeline(persistedTimeline, knownRunning);
+      if (knownRunning) backgroundTimelinesRef.current.set(session.id, restored);
+      timelineRef.current = restored;
+      setLiveUsage(restored.usage ?? null);
+      setTimeline(restored);
+      return;
+    }
+    if (knownRunning) {
+      const fallback = { ...initialTimelineState, messages: hydrated, loading: true };
+      timelineRef.current = fallback;
+      setTimeline(fallback);
+      return;
+    }
+    applyHistory(session.id, hydrated);
+  }, [applyHistory, currentModel, persistTimeline, refreshUsage]);
 
   const handlePickFolder = useCallback(async () => {
     try {
@@ -457,30 +681,49 @@ export default function App() {
     setSelectedSession(current => current ? { ...current, ...patch } : current);
   }, []);
 
+  const requireIdleSession = useCallback((sessionId: string, action: string) => {
+    if (!runningSessionsRef.current[sessionId]) return true;
+    setError(`Stop the running session before ${action}.`);
+    return false;
+  }, []);
+
   const handleRenameSession = useCallback(async (session: Session, title: string) => {
+    if (!requireIdleSession(session.id, 'renaming it')) return;
     try { await renameSession(session.id, title); applySessionPatch({ title }); await refreshSessions(); }
     catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to rename session'); }
-  }, [applySessionPatch, refreshSessions]);
+  }, [applySessionPatch, refreshSessions, requireIdleSession]);
 
   const handleSetCategory = useCallback(async (session: Session, category: string) => {
+    if (!requireIdleSession(session.id, 'changing its category')) return;
     try { await setSessionCategory(session.id, category); applySessionPatch({ category: category || undefined }); await refreshSessions(); }
     catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to set category'); }
-  }, [applySessionPatch, refreshSessions]);
+  }, [applySessionPatch, refreshSessions, requireIdleSession]);
 
   const handleSetFavorite = useCallback(async (session: Session, fav: boolean) => {
+    if (!requireIdleSession(session.id, 'changing its favorite state')) return;
     try { await setSessionFavorite(session.id, fav); applySessionPatch({ favorite: fav }); await refreshSessions(); }
     catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to update favorite'); }
-  }, [applySessionPatch, refreshSessions]);
+  }, [applySessionPatch, refreshSessions, requireIdleSession]);
 
   const handleDeleteSession = useCallback(async (session: Session) => {
+    if (!requireIdleSession(session.id, 'deleting it')) return;
     if (!(await confirm({ title: `Delete session "${session.title}"?`, message: 'This cannot be undone. The thread and its history will be permanently removed.', confirmLabel: 'Delete', tone: 'danger' }))) return;
     try {
+      await clearPersistedTimeline(session.id);
       await deleteSession(session.id);
+      backgroundTimelinesRef.current.delete(session.id);
+      sessionMessagesCache.current.delete(session.id);
       toast({ title: 'Session deleted', message: session.title, tone: 'success' });
-      if (selectedSession?.id === session.id) { setSelectedSession(null); setTimeline(initialTimelineState); }
+      if (selectedSession?.id === session.id) {
+        selectedSessionRef.current = null;
+        viewedSessionIdRef.current = '';
+        timelineRef.current = initialTimelineState;
+        setSelectedSession(null);
+        setTimeline(initialTimelineState);
+      }
       await refreshSessions();
     } catch (cause: unknown) { setError(cause instanceof Error ? cause.message : 'Failed to delete session'); }
-  }, [confirm, refreshSessions, selectedSession?.id, toast]);
+  }, [clearPersistedTimeline, confirm, refreshSessions, requireIdleSession, selectedSession?.id, toast]);
 
   const handleForkSession = useCallback(async (session: Session) => {
     try {
@@ -504,11 +747,11 @@ export default function App() {
 
   if (initStatus === 'loading') return <div className="flex h-screen w-screen items-center justify-center bg-background"><div className="text-center"><span className="mx-auto flex h-14 w-14 animate-pulse items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary"><Bot size={26} /></span><div className="mt-4 text-base font-medium text-foreground">Opening Rick Desktop</div><div className="mt-1 text-sm text-muted-foreground">Connecting your local workspace…</div></div></div>;
   if (initStatus === 'error') return <div className="flex h-screen w-screen items-center justify-center bg-background p-6"><div className="flat-panel max-w-md rounded-lg p-7 text-center"><span className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-border bg-muted text-muted-foreground"><CircleStop size={22} /></span><h2 className="mt-4 text-lg font-semibold text-foreground">Rick couldn’t start</h2><p className="mt-2 text-sm leading-relaxed text-muted-foreground">{error}</p><p className="mt-4 text-xs text-muted-foreground/70">Check that Rick is installed and rickserve is available on PATH.</p></div></div>;
-  if (showSettings) return <SettingsPage onClose={() => { setShowSettings(false); getConfig().then(setDesktopConfig).catch(() => {}); }} initialConfig={desktopConfig} />;
+  if (showSettings) return <SettingsPage onClose={() => { setShowSettings(false); getConfig().then(config => { desktopConfigRef.current = config; setDesktopConfig(config); setShowReasoning(config.show_reasoning); setReasoningExpanded(config.reasoning_expanded); }).catch(() => {}); }} initialConfig={desktopConfig} />;
   if (initStatus === 'ready' && rickStatus && !rickStatus.installed) return <SetupScreen status={rickStatus} busy={installingRick} error={error} onInstall={handleInstallRick} />;
 
   const customBackground = (desktopConfig?.background_mode || 'theme') !== 'theme';
-  return <div className={`flex h-screen w-screen overflow-hidden bg-background${customBackground ? ' has-app-background' : ''}`}><FullAppBackground src={backgroundSrc} scrimOpacity={backgroundScrimOpacity} /><Sidebar sessions={sessions} selectedSession={selectedSession} runningSessions={runningSessions} contextFiles={contextFiles} workspacePath={desktopConfig?.workspace_path} onPickFolder={handlePickFolder} onSelectSession={handleSelectSession} onNewChat={handleNewChat} onOpenSettings={() => setShowSettings(true)} onRenameSession={handleRenameSession} onSetCategory={handleSetCategory} onSetFavorite={handleSetFavorite} onDeleteSession={handleDeleteSession} onForkSession={handleForkSession} onExportSession={handleExportSession} /><div className="flex flex-1 flex-col app-shell"><header className="header"><div className="left"><span className="repo">{selectedSession?.cwd || 'rick-desktop'}</span><span className="sep">/</span><span className="branch"><span className="branchGlyph">⑂</span><span className="branchText">{selectedSession?.title || 'New thread'}</span></span></div><div className="right">{updateInfo?.update_available && <button type="button" onClick={handleInstallUpdate} disabled={updating} title={updateInfo.release_notes ? `Update to v${updateInfo.latest_version}\n\n${updateInfo.release_notes}` : `Update to v${updateInfo.latest_version}`} className="update-pill">{updating ? <RefreshCw size={12} className="animate-spin" /> : <ArrowDownToLine size={12} />}{updating ? 'Updating…' : `Update to v${updateInfo.latest_version}`}</button>}<button type="button" onClick={() => handleUndoRedo('undo')} title="Undo last change (snapshot)" className="iconBtn"><Undo2 size={13} /></button><button type="button" onClick={() => handleUndoRedo('redo')} title="Redo change (snapshot)" className="iconBtn"><Redo2 size={13} /></button><button type="button" onClick={refreshSessions} title="Refresh sessions" className="iconBtn"><RefreshCw size={13} /></button></div></header><main className="flex-1 overflow-hidden"><ChatPage messages={visible} loading={timeline.loading} error={error || timeline.error} commandCatalog={commandCatalog} showReasoning={showReasoning} providers={providers} currentModel={currentModel} onModelChange={setCurrentModel} thinkingMode={desktopConfig?.thinking_mode || 'auto'} onThinkingModeChange={value => patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] })} yolo={desktopConfig?.yolo || false} onYoloChange={value => patchConfig({ yolo: value })} permission={desktopConfig?.permission_profile || 'standard'} onPermissionChange={value => patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] })} onSend={handleSend} onStop={handleStop} onOpenSwarm={setOpenSwarm} agentType={agentType} onAgentTypeChange={setAgentType} onRespondPermission={handleApprove} pendingApprovals={pendingApprovals(timeline.messages)} selectedSession={selectedSession?.id} tokenUsage={sessionTokens} contextUsed={contextUsage.used} contextLimit={contextUsage.limit} /></main></div>{openSwarm && <SwarmInspector swarm={openSwarm} onClose={() => setOpenSwarm(null)} />}</div>;
+  return <div className={`flex h-screen w-screen overflow-hidden bg-background${customBackground ? ' has-app-background' : ''}`}><FullAppBackground src={backgroundSrc} scrimOpacity={backgroundScrimOpacity} />{sidebarCollapsed ? <button type="button" onClick={() => setSidebarCollapsed(false)} className="sidebar-reveal" aria-label="Show sidebar" title="Show sidebar"><ChevronRight size={15} /></button> : <Sidebar sessions={sessions} selectedSession={selectedSession} runningSessions={runningSessions} contextFiles={contextFiles} workspacePath={desktopConfig?.workspace_path} onPickFolder={handlePickFolder} onSelectSession={handleSelectSession} onNewChat={handleNewChat} onOpenSettings={() => setShowSettings(true)} onCollapse={() => setSidebarCollapsed(true)} onRenameSession={handleRenameSession} onSetCategory={handleSetCategory} onSetFavorite={handleSetFavorite} onDeleteSession={handleDeleteSession} onForkSession={handleForkSession} onExportSession={handleExportSession} />}<div className="flex flex-1 flex-col app-shell"><header className="header"><div className="left"><span className="repo">{selectedSession?.cwd || 'rick-desktop'}</span><span className="sep">/</span><span className="branch"><span className="branchGlyph">⑂</span><span className="branchText">{selectedSession?.title || 'New thread'}</span></span></div><div className="right">{updateInfo?.update_available && <button type="button" onClick={handleInstallUpdate} disabled={updating} title={updateInfo.release_notes ? `Update to v${updateInfo.latest_version}\n\n${updateInfo.release_notes}` : `Update to v${updateInfo.latest_version}`} className="update-pill">{updating ? <RefreshCw size={12} className="animate-spin" /> : <ArrowDownToLine size={12} />}{updating ? 'Updating…' : `Update to v${updateInfo.latest_version}`}</button>}<button type="button" onClick={() => handleUndoRedo('undo')} title="Undo last change (snapshot)" className="iconBtn"><Undo2 size={13} /></button><button type="button" onClick={() => handleUndoRedo('redo')} title="Redo change (snapshot)" className="iconBtn"><Redo2 size={13} /></button><button type="button" onClick={refreshSessions} title="Refresh sessions" className="iconBtn"><RefreshCw size={13} /></button></div></header><main className="flex-1 overflow-hidden"><ChatPage messages={visible} loading={timeline.loading} error={error || timeline.error} commandCatalog={commandCatalog} showReasoning={showReasoning} reasoningExpanded={reasoningExpanded} providers={providers} currentModel={currentModel} onModelChange={setCurrentModel} thinkingMode={desktopConfig?.thinking_mode || 'auto'} thinkingOptions={thinkingOptions} onThinkingModeChange={value => patchConfig({ thinking_mode: value as DesktopConfig['thinking_mode'] })} yolo={desktopConfig?.yolo || false} onYoloChange={value => patchConfig({ yolo: value })} permission={desktopConfig?.permission_profile || 'standard'} onPermissionChange={value => patchConfig({ permission_profile: value as DesktopConfig['permission_profile'] })} onSend={handleSend} onStop={handleStop} onOpenSwarm={setOpenSwarm} agentType={agentType} onAgentTypeChange={setAgentType} onRespondPermission={handleApprove} pendingApprovals={pendingApprovals(timeline.messages)} selectedSession={selectedSession?.id} tokenUsage={sessionTokens} contextUsed={contextUsage.used} contextLimit={contextUsage.limit} /></main></div>{openSwarm && <SwarmInspector swarm={openSwarm} onClose={() => setOpenSwarm(null)} />}</div>;
 }
 
 function SetupScreen({ status, busy, error, onInstall }: { status: RickStatus; busy: boolean; error?: string; onInstall: () => void }) {
@@ -536,8 +779,8 @@ function OptionDropdown({ icon, label, value, options, onChange }: { icon: React
   </div>;
 }
 
-function ThinkingSelector({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return <OptionDropdown icon={<BrainCircuit size={13} className="text-muted-foreground" />} label="Thinking" value={value} onChange={onChange} options={[{ value: 'auto', label: 'Auto' }, { value: 'off', label: 'Off' }, { value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }]} />;
+function ThinkingSelector({ value, onChange, options }: { value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) {
+  return <OptionDropdown icon={<BrainCircuit size={13} className="text-muted-foreground" />} label="Thinking" value={value} onChange={onChange} options={options} />;
 }
 
 function PermissionSelector({ value, onChange }: { value: string; onChange: (value: string) => void }) {
@@ -584,10 +827,12 @@ interface ChatPageProps {
   error?: string;
   commandCatalog: CommandSpec[];
   showReasoning: boolean;
+  reasoningExpanded: boolean;
   providers: Provider[];
   currentModel: string;
   onModelChange: (model: string) => void;
   thinkingMode: string;
+  thinkingOptions: Array<{ value: string; label: string }>;
   onThinkingModeChange: (value: string) => void;
   onSend: (text: string, attachments?: Attachment[]) => void;
   onStop: () => void;
@@ -606,17 +851,27 @@ interface ChatPageProps {
   contextLimit: number;
 }
 
-export function ChatPage({ messages, loading, error, commandCatalog, showReasoning, providers, currentModel, onModelChange, thinkingMode, onThinkingModeChange, onSend, onStop, onOpenSwarm, yolo, onYoloChange, permission, onPermissionChange, agentType, onAgentTypeChange, onRespondPermission, pendingApprovals, selectedSession, tokenUsage, contextUsed, contextLimit }: ChatPageProps) {
+export function ChatPage({ messages, loading, error, commandCatalog, showReasoning, reasoningExpanded, providers, currentModel, onModelChange, thinkingMode, thinkingOptions, onThinkingModeChange, onSend, onStop, onOpenSwarm, yolo, onYoloChange, permission, onPermissionChange, agentType, onAgentTypeChange, onRespondPermission, pendingApprovals, selectedSession, tokenUsage, contextUsed, contextLimit }: ChatPageProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | undefined>();
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const isFollowingRef = useRef(true);
+  const scrollStateRef = useRef<ChatScrollState>({ sessionId: selectedSession, pendingSwitch: false });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestions = useMemo(() => commandSuggestions(input, commandCatalog), [input, commandCatalog]);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  useLayoutEffect(() => {
+    const decision = nextChatScroll(scrollStateRef.current, selectedSession, messages.length, isFollowingRef.current);
+    scrollStateRef.current = decision.state;
+    if (decision.behavior) {
+      messagesEndRef.current?.scrollIntoView({ behavior: decision.behavior });
+      isFollowingRef.current = true;
+    }
+  }, [messages, selectedSession]);
   useEffect(() => setSuggestionIndex(0), [input]);
 
   const addFiles = (files: FileList | null) => {
@@ -675,10 +930,25 @@ export function ChatPage({ messages, loading, error, commandCatalog, showReasoni
 
   return (
     <div className="flex h-full flex-col">
-      <div className="reference-chat flex-1 overflow-y-auto chat-scroll-fade">
+      <div ref={messagesViewportRef} onScroll={() => {
+        const viewport = messagesViewportRef.current;
+        if (!viewport) return;
+        isFollowingRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 48;
+      }} className="reference-chat flex-1 overflow-y-auto chat-scroll-fade">
         <div className="mx-auto w-full max-w-[760px]">
           {messages.length === 0 && !error && <Welcome onPick={onSend} />}
-          {messages.length > 0 && <Timeline messages={messages} loading={loading} showReasoning={showReasoning} modelLabel={currentModel} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />}
+          {messages.length > 0 && <>
+            <Timeline messages={messages} loading={loading} showReasoning={showReasoning} reasoningExpanded={reasoningExpanded} modelLabel={currentModel} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />
+            {loading && messages[messages.length - 1]?.role === 'user' && (
+              <div className="row" aria-live="polite">
+                <div className="avatarAssistant" />
+                <div className="body">
+                  <div className="name">Rick</div>
+                  <div className="flex items-center gap-1.5 text-muted-foreground"><Loader2 size={11} className="animate-spin" />Working…</div>
+                </div>
+              </div>
+            )}
+          </>}
           {pendingApprovals.length > 0 && <div className="codex-approval-banner mt-3 flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-[11px] text-muted-foreground"><ShieldCheck size={13} />{pendingApprovals.length} approval{pendingApprovals.length === 1 ? '' : 's'} waiting in the timeline above</div>}
           {error && <div className="codex-error">{error}</div>}
           <div ref={messagesEndRef} />
@@ -712,7 +982,7 @@ export function ChatPage({ messages, loading, error, commandCatalog, showReasoni
                 <div className="flex min-w-0 items-center gap-1.5 overflow-visible">
                   <div className="codex-composer-model"><ModelSelector providers={providers} currentModel={currentModel} onModelChange={onModelChange} /></div>
                   <AgentSelector value={agentType} onChange={onAgentTypeChange} />
-                  <ThinkingSelector value={thinkingMode} onChange={onThinkingModeChange} />
+                  <ThinkingSelector value={thinkingMode} onChange={onThinkingModeChange} options={thinkingOptions} />
                   <YoloToggle value={yolo} onChange={onYoloChange} />
                   <PermissionSelector value={permission} onChange={onPermissionChange} />
                 </div>
@@ -776,19 +1046,19 @@ function formatBytes(value?: number): string {
 
 function CommandMenu({ suggestions, selected, onSelect }: { suggestions: CommandSuggestion[]; selected: number; onSelect: (suggestion: CommandSuggestion) => void }) { return <div className="dropdown-popover absolute bottom-full left-0 z-30 mb-2 w-full overflow-hidden rounded-lg p-1">{suggestions.slice(0, 8).map((suggestion, index) => <button type="button" key={`${suggestion.spec.name}-${suggestion.argument || ''}`} onMouseDown={(event) => { event.preventDefault(); onSelect(suggestion); }} className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] ${index === selected ? 'bg-surface-2 text-foreground' : 'text-foreground hover:bg-surface-2'}`}><Command size={12} className="text-muted-foreground" /><span className="font-mono text-foreground">/{suggestion.matchedAlias || suggestion.spec.name}</span><span className="truncate text-[10px] text-muted-foreground">{suggestion.argument || suggestion.spec.description}</span>{suggestion.spec.dangerous && <span className="ml-auto text-[9px] uppercase tracking-wider text-muted-foreground">Approval</span>}</button>)}</div>; }
 
-function Timeline({ messages, loading, showReasoning, modelLabel, onOpenSwarm, onRespondPermission }: { messages: TimelineMessage[]; loading: boolean; showReasoning: boolean; modelLabel: string; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
+function Timeline({ messages, loading, showReasoning, reasoningExpanded, modelLabel, onOpenSwarm, onRespondPermission }: { messages: TimelineMessage[]; loading: boolean; showReasoning: boolean; reasoningExpanded: boolean; modelLabel: string; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
   const shortModel = formatModelLabel(modelLabel.split('/').pop() || modelLabel);
-  return <div className="codex-timeline">{messages.map(message => <MessageRow key={message.id} message={message} loading={loading} showReasoning={showReasoning} shortModel={shortModel} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />)}</div>;
+  return <div className="codex-timeline">{messages.map(message => <MessageRow key={message.id} message={message} loading={loading} showReasoning={showReasoning} reasoningExpanded={reasoningExpanded} shortModel={shortModel} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />)}</div>;
 }
 
-const MessageRow = memo(function MessageRow({ message, loading, showReasoning, shortModel, onOpenSwarm, onRespondPermission }: { message: TimelineMessage; loading: boolean; showReasoning: boolean; shortModel: string; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
+const MessageRow = memo(function MessageRow({ message, loading, showReasoning, reasoningExpanded, shortModel, onOpenSwarm, onRespondPermission }: { message: TimelineMessage; loading: boolean; showReasoning: boolean; reasoningExpanded: boolean; shortModel: string; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
   const isUser = message.role === 'user';
   return (
     <div className="row">
       <div className={isUser ? 'avatarUser' : 'avatarAssistant'} />
       <div className="body">
         <div className="name">{isUser ? 'You' : 'Rick'}{!isUser && shortModel && <span className="modelBadge">{shortModel}</span>}</div>
-        {message.blocks.map(block => <BlockView key={block.id} block={block} showReasoning={showReasoning} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />)}
+        {message.blocks.map(block => <BlockView key={block.id} block={block} showReasoning={showReasoning} reasoningExpanded={reasoningExpanded} onOpenSwarm={onOpenSwarm} onRespondPermission={onRespondPermission} />)}
         {!isUser && loading && !message.done && <span className="caret" />}
       </div>
     </div>
@@ -854,9 +1124,14 @@ function ToolCard({ tool }: { tool: NonNullable<TimelineBlock['tool']> }) {
   return <details className="codex-tool" open={tool.status === 'running' || tool.status === 'approval_required'}><summary><span className={`codex-tool-dot ${tool.status}`} /><span>{tool.name}</span><span className="ml-auto text-[10px] text-muted-foreground">{tool.status.replace('_', ' ')}</span></summary><div className="codex-tool-detail"><pre>{tool.error || tool.result || (tool.arguments ? JSON.stringify(tool.arguments, null, 2) : 'Waiting for output…')}</pre></div></details>;
 }
 
-function BlockView({ block, showReasoning, onOpenSwarm, onRespondPermission }: { block: TimelineBlock; showReasoning: boolean; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
-  if (block.kind === 'text') return <p className="text">{block.text}</p>;
-  if (block.kind === 'reasoning') return showReasoning ? <details open={block.expanded ?? true} className="codex-reasoning"><summary>Thinking</summary><p className="mt-1.5 whitespace-pre-wrap leading-relaxed">{block.text}</p></details> : null;
+function ReasoningBlock({ text, defaultExpanded }: { text?: string; defaultExpanded: boolean }) {
+  const [open, setOpen] = useState(defaultExpanded);
+  return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="codex-reasoning"><summary>Thinking</summary><p className="mt-1.5 whitespace-pre-wrap leading-relaxed">{text}</p></details>;
+}
+
+function BlockView({ block, showReasoning, reasoningExpanded, onOpenSwarm, onRespondPermission }: { block: TimelineBlock; showReasoning: boolean; reasoningExpanded: boolean; onOpenSwarm?: (swarm: SwarmActivity) => void; onRespondPermission: (permission: PermissionRequest, decision: 'accept' | 'reject' | 'always') => void }) {
+  if (block.kind === 'text') return <div className="text markdownText"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a> }}>{block.text || ''}</ReactMarkdown></div>;
+  if (block.kind === 'reasoning') return showReasoning ? <ReasoningBlock text={block.text} defaultExpanded={reasoningExpanded} /> : null;
   if (block.kind === 'permission' && block.permission) return <ApprovalCard permission={block.permission} onRespond={onRespondPermission} />;
   if (block.kind === 'tool' && block.tool) return <ToolCard tool={block.tool} />;
   if (block.kind === 'swarm' && block.swarm) { const swarm = block.swarm; const completed = swarm.agents.filter(agent => agent.status === 'completed').length; return <button type="button" onClick={() => onOpenSwarm?.(swarm)} className="codex-change-row"><UsersRound size={13} className="text-muted-foreground" /><span>{swarm.title || 'Swarm team'}</span><span className="ml-auto text-[10px] text-muted-foreground">{completed}/{swarm.agents.length || '—'} · {swarm.status}</span></button>; }
@@ -913,7 +1188,9 @@ export function SettingsPage({ onClose, initialConfig }: SettingsPageProps) {
     applyTheme(nextConfig.theme);
   };
 
-  useEffect(() => { reload().catch(error => setStatus(error instanceof Error ? error.message : 'Failed to load settings')); }, []);
+  useEffect(() => {
+    reload().catch(error => setStatus(error instanceof Error ? error.message : 'Failed to load settings'));
+  }, []);
 
   const save = async (patch: Partial<DesktopConfig>) => {
     if (!config) return;
@@ -1035,7 +1312,7 @@ function Goals() {
   return <><Card title="Create a goal" description="Goals are stored in Rick's canonical goal store and honoured by agent runs."><div className="flex gap-2"><input value={title} onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') create(); }} placeholder="What should I work on?" className="min-w-0 flex-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary" /><button type="button" onClick={create} disabled={!title.trim()} className="rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-40">Create</button></div>{goalError && <p className="mt-2 text-[11px] text-foreground">{goalError}</p>}</Card><Card title={`Active goals (${goals.length})`} description="Track progress and token spend per goal. Active goals feed the agent's /goal workflow.">{goals.length === 0 ? <p className="text-xs text-muted-foreground">No goals yet.</p> : <div className="space-y-2">{goals.map(goal => <div key={goal.id} className="rounded-xl border border-border bg-surface-2 p-3"><div className="flex items-center gap-2"><ListChecks size={13} className="text-muted-foreground" /><span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{goal.title}</span><span className="text-[10px] text-muted-foreground">{goal.status}</span></div><div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground"><span>{stepCount(goal)}/{goal.steps?.length || 0} steps</span><span>·</span><span>{(goal.tokens_used || 0) >= 1000 ? `${Math.round((goal.tokens_used || 0) / 1000)}k` : goal.tokens_used || 0} tokens</span></div>{(goal.steps || []).length > 0 && <div className="mt-2 space-y-1">{goal.steps!.map(step => <div key={step.id} className="flex items-center gap-2 text-[11px]"><span className={`h-1.5 w-1.5 rounded-full ${step.status === 'done' ? 'bg-foreground/70' : step.status === 'in_progress' ? 'animate-pulse bg-primary' : step.status === 'skipped' ? 'bg-muted-foreground/30' : 'bg-muted-foreground/50'}`} /><span className="min-w-0 flex-1 truncate text-foreground/80">{step.content}</span><span className="text-[9px] uppercase text-muted-foreground">{step.status}</span></div>)}</div>}<div className="mt-2.5 flex gap-1.5">{goal.status === 'active' ? <button type="button" onClick={() => setStatus(goal, 'completed')} className="rounded-md border border-border px-2 py-1 text-[10px] text-foreground hover:bg-muted">Mark done</button> : <button type="button" onClick={() => setStatus(goal, 'active')} className="rounded-md border border-border px-2 py-1 text-[10px] text-foreground hover:bg-surface-2">Reopen</button>}<button type="button" onClick={() => setStatus(goal, 'aborted')} className="rounded-md border border-border px-2 py-1 text-[10px] text-foreground hover:bg-muted">Abort</button><button type="button" onClick={() => remove(goal)} className="rounded-md border border-border px-2 py-1 text-[10px] text-foreground hover:bg-muted">Delete</button></div></div>)}</div>}</Card></>;
 }
 
-function Execution({ config, save }: { config: DesktopConfig; save: (patch: Partial<DesktopConfig>) => Promise<void> }) { return <><Card title="Permission profile" description="The selected profile is sent with new runs; approvals remain visible as first-class timeline events."><Select value={config.permission_profile} onChange={value => save({ permission_profile: value as DesktopConfig['permission_profile'] })}><option value="readonly">Read only</option><option value="standard">Standard</option><option value="trusted">Trusted</option><option value="ci">CI</option></Select></Card><Card title="Thinking mode" description="This mirrors Rick's /thinking setting for new runs."><Select value={config.thinking_mode || 'auto'} onChange={value => save({ thinking_mode: value as DesktopConfig['thinking_mode'] })}><option value="auto">Auto</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></Select></Card><Card title="YOLO mode" description="YOLO is sent to the canonical Rick runtime for new runs. Keep it off unless you explicitly want approvals bypassed."><Toggle checked={config.yolo} onChange={value => save({ yolo: value })} label="Enable YOLO mode" /></Card><Card title="Sandbox"><Select value={config.sandbox} onChange={value => save({ sandbox: value as DesktopConfig['sandbox'] })}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="trusted">Trusted</option><option value="off">Off</option></Select></Card></>; }
+function Execution({ config, save }: { config: DesktopConfig; save: (patch: Partial<DesktopConfig>) => Promise<void> }) { return <><Card title="Permission profile" description="The selected profile is sent with new runs; approvals remain visible as first-class timeline events."><Select value={config.permission_profile} onChange={value => save({ permission_profile: value as DesktopConfig['permission_profile'] })}><option value="readonly">Read only</option><option value="standard">Standard</option><option value="trusted">Trusted</option><option value="ci">CI</option></Select></Card><Card title="Thinking mode" description="This mirrors Rick's /thinking setting for new runs; unsupported levels are rejected for the selected model."><Select value={config.thinking_mode || 'auto'} onChange={value => save({ thinking_mode: value as DesktopConfig['thinking_mode'] })}><option value="auto">Auto</option><option value="off">Off</option><option value="on">On</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option></Select></Card><Card title="YOLO mode" description="YOLO is sent to the canonical Rick runtime for new runs. Keep it off unless you explicitly want approvals bypassed."><Toggle checked={config.yolo} onChange={value => save({ yolo: value })} label="Enable YOLO mode" /></Card><Card title="Sandbox"><Select value={config.sandbox} onChange={value => save({ sandbox: value as DesktopConfig['sandbox'] })}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="trusted">Trusted</option><option value="off">Off</option></Select></Card></>; }
 
 function Swarms({ config, save }: { config: DesktopConfig; save: (patch: Partial<DesktopConfig>) => Promise<void> }) { return <><Card title="Team execution" description="Live swarm cards aggregate agent status and open a per-agent inspector. Concurrency is persisted as a Desktop preference and passed to future swarm-capable runs."><label className="text-xs text-muted-foreground">Maximum concurrent agents</label><input type="number" min={1} max={32} value={config.max_swarm_concurrency} onChange={event => save({ max_swarm_concurrency: Math.max(1, Math.min(32, Number(event.target.value) || 1)) })} className="mt-2 w-32 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary" /></Card><Card title="Visibility"><p className="text-xs leading-relaxed text-muted-foreground">Swarm and team events are preserved even when a provider emits an event name the Desktop has not seen before; unknown payloads are retained for diagnostics rather than discarded.</p></Card></>; }
 

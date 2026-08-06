@@ -20,7 +20,10 @@ import (
 	"rickdesktop/internal/commands"
 	"rickdesktop/internal/config"
 	"rickdesktop/internal/domain"
+	"rickdesktop/internal/extensions"
+	"rickdesktop/internal/nvpn"
 	"rickdesktop/internal/sessions"
+	"rickdesktop/internal/timelinecache"
 	"rickdesktop/internal/usage"
 )
 
@@ -29,6 +32,10 @@ type App struct {
 	bridge             *bridge.Service
 	configStore        *config.Store
 	sessionStore       *sessions.Store
+	timelineStore      *timelinecache.Store
+	extensions         *extensions.Registry
+	nvpn               *nvpn.Service
+	openvpn            *nvpn.OpenVPNService
 	mu                 sync.Mutex
 	currentRunID       string
 	currentSessionID   string
@@ -74,7 +81,18 @@ func NewApp() *App {
 	app := &App{}
 	app.configStore = config.NewStore(app.desktopSettingsPath())
 	app.sessionStore = sessions.NewStore(app.sessionsPath())
+	app.timelineStore = timelinecache.New(filepath.Join(filepath.Dir(app.sessionsPath()), ".rickdesktop", "timelines"))
 	app.oneShotCache = make(map[string]oneShotCacheEntry, 8)
+	registry, err := extensions.NewRegistry(filepath.Join(app.rickConfigDir(), "extensions.json"))
+	if err != nil {
+		// A corrupt registry must not prevent the app from starting; the
+		// extensions tab will surface the error when it lists them.
+		println("extensions registry:", err.Error())
+		registry, _ = extensions.NewRegistry("")
+	}
+	app.extensions = registry
+	app.nvpn = nvpn.New()
+	app.openvpn = nvpn.NewOpenVPN(filepath.Join(app.rickConfigDir(), "nvpn"))
 	return app
 }
 
@@ -82,11 +100,54 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.emitRickStatus()
 	a.startUpdateCheck()
+	a.maybeAutoConnectNvpn()
 	a.startRickserve()
+}
+
+// maybeAutoConnectNvpn connects the tunnel at startup when the NVPN extension
+// is enabled, "auto connect on start" is on, and the matching credentials are
+// saved. Runs before rickserve starts so its traffic is proxied from the
+// beginning.
+func (a *App) maybeAutoConnectNvpn() {
+	if !a.extensions.Enabled(extensions.BuiltinNVPN.ID) {
+		return
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		a.EmitError(err)
+		return
+	}
+	if state.OpenVPNAutoConnect && state.OpenVPNUsername != "" && state.OpenVPNPassword != "" {
+		if _, err := a.openvpn.Connect(state.OpenVPNUsername, state.OpenVPNPassword); err != nil {
+			a.EmitError(fmt.Errorf("NVPN auto-connect: %w", err))
+		} else {
+			a.restartRickserve()
+		}
+		return
+	}
+	if !state.AutoConnect || strings.TrimSpace(state.Username) == "" || strings.TrimSpace(state.Password) == "" {
+		return
+	}
+	if _, err := a.nvpn.Connect(state.Username, state.Password); err != nil {
+		a.EmitError(fmt.Errorf("NVPN auto-connect: %w", err))
+	}
 }
 
 func (a *App) shutdown(_ context.Context) {
 	a.stopRickserve()
+	_ = a.nvpn.Stop()
+}
+
+// rickserveEnv is the environment for rickserve processes (the long-running
+// daemon and one-shot queries). When NVPN is connected, outbound traffic is
+// routed through the local tunnel proxy so provider API requests go over the
+// VPN.
+func (a *App) rickserveEnv() []string {
+	env := os.Environ()
+	if proxyURL := a.nvpn.ProxyURL(); proxyURL != "" {
+		env = append(env, "HTTP_PROXY="+proxyURL, "HTTPS_PROXY="+proxyURL, "ALL_PROXY="+proxyURL)
+	}
+	return env
 }
 
 func (a *App) startRickserve() {
@@ -101,11 +162,19 @@ func (a *App) startRickserve() {
 		return
 	}
 	a.bridge = bridge.NewService(path, a.handleRickEvent, a.EmitError)
+	a.bridge.SetEnv(a.rickserveEnv())
 	service := a.bridge
 	a.mu.Unlock()
 	if err := service.Start(); err != nil {
 		a.EmitError(err)
 	}
+}
+
+// restartRickserve bounces the daemon so a changed proxy environment takes
+// effect (rickserve inherits HTTP_PROXY/HTTPS_PROXY at spawn time).
+func (a *App) restartRickserve() {
+	a.stopRickserve()
+	a.startRickserve()
 }
 
 func (a *App) stopRickserve() {
@@ -193,6 +262,7 @@ type FrontendEvent struct {
 }
 
 type RunOptions struct {
+	RunID             string       `json:"run_id,omitempty"`
 	MaxTurns          int          `json:"max_turns,omitempty"`
 	PermissionProfile string       `json:"permission_profile,omitempty"`
 	Sandbox           string       `json:"sandbox,omitempty"`
@@ -238,7 +308,10 @@ func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) (st
 	if service == nil {
 		return "", errors.New("rickserve is not available")
 	}
-	runID := bridge.NewRequestID("run")
+	runID := options.RunID
+	if runID == "" {
+		runID = bridge.NewRequestID("run")
+	}
 	requestID := bridge.NewRequestID("request")
 	request := map[string]any{
 		"type":       "run",
@@ -298,7 +371,7 @@ func (a *App) runPrompt(prompt, model, sessionID string, options RunOptions) (st
 // StopRun interrupts the run for the given session, falling back to the most
 // recently started run when no id is supplied (e.g. a fresh thread whose
 // run has just been dispatched).
-func (a *App) StopRun(sessionID string) error {
+func (a *App) StopRun(sessionID, runID string) error {
 	a.mu.Lock()
 	if sessionID == "" {
 		sessionID = a.currentSessionID
@@ -311,7 +384,11 @@ func (a *App) StopRun(sessionID string) error {
 	if sessionID != "" {
 		// Interrupt the live run through the protocol instead of killing the
 		// daemon, so the session is saved and the stream reports "cancelled".
-		if err := service.Send(map[string]any{"type": "interrupt", "session_id": sessionID}); err != nil {
+		request := map[string]any{"type": "interrupt", "session_id": sessionID}
+		if runID != "" {
+			request["run_id"] = runID
+		}
+		if err := service.Send(request); err != nil {
 			return err
 		}
 	}
@@ -351,7 +428,7 @@ func (a *App) queryOneShot(request map[string]any) (json.RawMessage, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	responses, err := bridge.OneShot(ctx, path, request)
+	responses, err := bridge.OneShot(ctx, path, request, a.rickserveEnv())
 	if err != nil {
 		return nil, err
 	}
@@ -702,7 +779,7 @@ func (a *App) GetProviders() ([]Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	responses, err := bridge.OneShot(context.Background(), path, map[string]any{"type": "models"})
+	responses, err := bridge.OneShot(context.Background(), path, map[string]any{"type": "models"}, a.rickserveEnv())
 	if err != nil {
 		return nil, err
 	}
@@ -725,7 +802,7 @@ func (a *App) GetProviders() ([]Provider, error) {
 			providers[info.Provider] = provider
 			order = append(order, info.Provider)
 		}
-		provider.Models = append(provider.Models, Model{ID: info.ID, Name: info.Name, Provider: info.Provider, ContextWindow: info.ContextWindow, Configured: info.Configured, IsDefault: info.Default, Free: isFreeModel(info.ID, info.Name)})
+		provider.Models = append(provider.Models, Model{ID: info.ID, Name: info.Name, Provider: info.Provider, ContextWindow: info.ContextWindow, Configured: info.Configured, IsDefault: info.Default, Free: isFreeModel(info.ID, info.Name), ReasoningEfforts: info.ReasoningEfforts, ReasoningDefault: info.ReasoningDefault, ReasoningMandatory: info.ReasoningMandatory})
 	}
 	result := make([]Provider, 0, len(order))
 	for _, name := range order {
@@ -742,7 +819,7 @@ func (a *App) GetTools() ([]bridge.ToolInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	responses, err := bridge.OneShot(context.Background(), path, map[string]any{"type": "tools"})
+	responses, err := bridge.OneShot(context.Background(), path, map[string]any{"type": "tools"}, a.rickserveEnv())
 	if err != nil {
 		return nil, err
 	}
@@ -786,13 +863,16 @@ type Provider struct {
 }
 
 type Model struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Provider      string `json:"provider"`
-	ContextWindow int    `json:"context_window"`
-	Configured    bool   `json:"configured"`
-	IsDefault     bool   `json:"is_default"`
-	Free          bool   `json:"free"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Provider           string   `json:"provider"`
+	ContextWindow      int      `json:"context_window"`
+	Configured         bool     `json:"configured"`
+	IsDefault          bool     `json:"is_default"`
+	Free               bool     `json:"free"`
+	ReasoningEfforts   []string `json:"reasoning_efforts,omitempty"`
+	ReasoningDefault   string   `json:"reasoning_default,omitempty"`
+	ReasoningMandatory bool     `json:"reasoning_mandatory,omitempty"`
 }
 
 type Session struct {
@@ -880,11 +960,12 @@ func (a *App) GetUsageDaily(days int) ([]DailyUsage, error) {
 }
 
 type ChatMessage struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Done      bool   `json:"done"`
+	ID        string                  `json:"id"`
+	Role      string                  `json:"role"`
+	Content   string                  `json:"content,omitempty"`
+	Blocks    []sessions.ContentBlock `json:"blocks,omitempty"`
+	Timestamp string                  `json:"timestamp,omitempty"`
+	Done      bool                    `json:"done"`
 }
 
 func (a *App) GetSessions() ([]Session, error) {
@@ -893,9 +974,31 @@ func (a *App) GetSessions() ([]Session, error) {
 		return nil, err
 	}
 	result := make([]Session, 0, len(summaries))
+	known := make(map[string]struct{}, len(summaries))
 	for _, summary := range summaries {
-		result = append(result, sessionFromSummary(summary))
+		session := sessionFromSummary(summary)
+		result = append(result, session)
+		known[session.ID] = struct{}{}
 	}
+	// A new rick session is canonical only after the first run completes. Merge
+	// Desktop sidecar metadata so an in-flight prompt remains reachable even if
+	// the app restarts before rick writes the canonical file.
+	persisted, listErr := a.timelineStore.List()
+	if listErr == nil {
+		for sessionID, payload := range persisted {
+			if _, exists := known[sessionID]; exists {
+				continue
+			}
+			var envelope struct {
+				Session Session `json:"session"`
+			}
+			if json.Unmarshal(payload, &envelope) != nil || envelope.Session.ID != sessionID {
+				continue
+			}
+			result = append(result, envelope.Session)
+		}
+	}
+	sort.SliceStable(result, func(left, right int) bool { return result[left].Updated > result[right].Updated })
 	return result, nil
 }
 
@@ -906,9 +1009,26 @@ func (a *App) GetSessionMessages(sessionID string) ([]ChatMessage, error) {
 	}
 	result := make([]ChatMessage, 0, len(messages))
 	for index, message := range messages {
-		result = append(result, ChatMessage{ID: fmt.Sprintf("%s-%d", sessionID, index), Role: message.Role, Content: message.Content, Done: true})
+		result = append(result, ChatMessage{ID: fmt.Sprintf("%s-%d", sessionID, index), Role: message.Role, Content: message.Content, Blocks: message.Blocks, Done: true})
 	}
 	return result, nil
+}
+
+// SaveDesktopTimeline stores the exact formatted UI state for an in-flight
+// session. Rick's canonical session remains authoritative after success; this
+// sidecar protects optimistic prompts and live event blocks while a run is
+// active or interrupted.
+func (a *App) SaveDesktopTimeline(sessionID, payload string) error {
+	return a.timelineStore.Save(sessionID, []byte(payload))
+}
+
+func (a *App) LoadDesktopTimeline(sessionID string) (string, error) {
+	payload, err := a.timelineStore.Load(sessionID)
+	return string(payload), err
+}
+
+func (a *App) DeleteDesktopTimeline(sessionID string) error {
+	return a.timelineStore.Delete(sessionID)
 }
 
 func (a *App) RenameSession(id, title string) error { return a.sessionStore.Rename(id, title) }
@@ -918,7 +1038,12 @@ func (a *App) SetSessionCategory(id, category string) error {
 func (a *App) SetSessionFavorite(id string, fav bool) error {
 	return a.sessionStore.SetFavorite(id, fav)
 }
-func (a *App) DeleteSession(id string) error { return a.sessionStore.Delete(id) }
+func (a *App) DeleteSession(id string) error {
+	if err := a.sessionStore.Delete(id); err != nil {
+		return err
+	}
+	return a.timelineStore.Delete(id)
+}
 func (a *App) ForkSession(id string) (Session, error) {
 	summary, err := a.sessionStore.Fork(id)
 	if err != nil {
@@ -969,7 +1094,7 @@ func (a *App) GetUsageStats(sessionID, model string) (UsageStats, error) {
 	if err != nil {
 		return UsageStats{}, err
 	}
-	session, err := usage.ReadSession(a.sessionStore.Dir(), sessionID)
+	sessionStats, err := usage.ReadSessionStats(a.sessionStore.Dir(), sessionID)
 	if err != nil {
 		return UsageStats{}, err
 	}
@@ -983,11 +1108,16 @@ func (a *App) GetUsageStats(sessionID, model string) (UsageStats, error) {
 	lastUsage := a.lastUsage
 	lastUsageSessionID := a.lastUsageSessionID
 	a.mu.Unlock()
-	contextUsed := 0
+	contextUsed := sessionStats.ContextUsed
 	if lastUsageSessionID == sessionID || (sessionID == "" && lastUsageSessionID == "") {
-		contextUsed = lastUsage.ContextTokens
+		if lastUsage.ContextTokens > 0 {
+			contextUsed = lastUsage.ContextTokens
+		}
+		if lastUsage.ContextLimit > 0 {
+			contextLimit = lastUsage.ContextLimit
+		}
 	}
-	return UsageStats{SessionID: sessionID, Model: model, Session: fromCounters(session), Total: fromCounters(total), ContextUsed: contextUsed, ContextLimit: contextLimit, ContextKnown: contextLimit > 0 && contextUsed > 0}, nil
+	return UsageStats{SessionID: sessionID, Model: model, Session: fromCounters(sessionStats.Counters), Total: fromCounters(total), ContextUsed: contextUsed, ContextLimit: contextLimit, ContextKnown: contextLimit > 0 && contextUsed > 0}, nil
 }
 
 // advertisedContextWindow returns the context window rickserve advertises for
@@ -1119,6 +1249,251 @@ func (a *App) GetRickVersion() string {
 	version := strings.TrimSpace(string(output))
 	a.versionCache.set(version)
 	return version
+}
+
+// ---------- extensions ----------
+
+// GetExtensions lists all extensions (built-in and user-added) with their
+// enabled state.
+func (a *App) GetExtensions() ([]extensions.Extension, error) {
+	return a.extensions.List(), nil
+}
+
+// SetExtensionEnabled flips an extension's enabled flag.
+func (a *App) SetExtensionEnabled(id string, enabled bool) error {
+	return a.extensions.SetEnabled(id, enabled)
+}
+
+// AddExtension opens the native picker for an extension manifest (JSON) and
+// registers it.
+func (a *App) AddExtension() (extensions.Extension, error) {
+	if a.ctx == nil {
+		return extensions.Extension{}, nil
+	}
+	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:   "Add extension manifest",
+		Filters: []wailsruntime.FileFilter{{DisplayName: "Extension manifest", Pattern: "*.json"}},
+	})
+	if err != nil {
+		return extensions.Extension{}, err
+	}
+	if path == "" {
+		return extensions.Extension{}, errors.New("no file selected")
+	}
+	return a.extensions.AddUserExtension(path)
+}
+
+// RemoveExtension deletes a user-uploaded extension.
+func (a *App) RemoveExtension(id string) error {
+	return a.extensions.RemoveUserExtension(id)
+}
+
+// ---------- NVPN extension ----------
+
+// NvpnGetSettings returns the stored NVPN configuration. Passwords are never
+// sent to the renderer; only whether one is saved.
+func (a *App) NvpnGetSettings() (nvpn.Settings, error) {
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return nvpn.Settings{}, err
+	}
+	return nvpn.Settings{
+		Username:    state.Username,
+		HasPassword: state.Password != "",
+		AutoConnect: state.AutoConnect,
+		OpenVPN: nvpn.OpenVPNSettings{
+			Username:    state.OpenVPNUsername,
+			ConfigName:  state.OpenVPNConfigName,
+			HasPassword: state.OpenVPNPassword != "",
+			AutoConnect: state.OpenVPNAutoConnect,
+		},
+	}, nil
+}
+
+// NvpnSetCredentials saves NVPN service credentials. An empty password keeps
+// the previously saved one, so the UI can leave the field blank when
+// unchanged.
+func (a *App) NvpnSetCredentials(username, password string) error {
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return err
+	}
+	state.Username = username
+	if password != "" {
+		state.Password = password
+	}
+	return a.extensions.SaveNVPN(state)
+}
+
+// NvpnSetAutoConnect persists the "auto connect on start" flag.
+func (a *App) NvpnSetAutoConnect(autoConnect bool) error {
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return err
+	}
+	state.AutoConnect = autoConnect
+	return a.extensions.SaveNVPN(state)
+}
+
+// NvpnConnect connects to the fastest NordVPN server and restarts rickserve
+// so its traffic (provider API requests) is routed through the tunnel.
+func (a *App) NvpnConnect() (nvpn.Status, error) {
+	if err := a.openvpn.Stop(); err != nil {
+		return nvpn.Status{}, err
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	status, err := a.nvpn.Connect(state.Username, state.Password)
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	a.restartRickserve()
+	return status, nil
+}
+
+// NvpnStop disconnects the tunnel and restores direct traffic.
+func (a *App) NvpnStop() error {
+	if err := a.nvpn.Stop(); err != nil {
+		return err
+	}
+	a.restartRickserve()
+	return nil
+}
+
+// NvpnReconnect bounces the tunnel to the fastest server.
+func (a *App) NvpnReconnect() (nvpn.Status, error) {
+	if err := a.openvpn.Stop(); err != nil {
+		return nvpn.Status{}, err
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	status, err := a.nvpn.Reconnect(state.Username, state.Password)
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	a.restartRickserve()
+	return status, nil
+}
+
+// ---------- OpenVPN mode ----------
+
+// NvpnImportOpenvpnConfig opens the native picker for a .ovpn profile and
+// sanitizes it into a strict split tunnel (only provider API routes pinned).
+func (a *App) NvpnImportOpenvpnConfig() (nvpn.ImportResult, error) {
+	if a.ctx == nil {
+		return nvpn.ImportResult{}, nil
+	}
+	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:   "Import OpenVPN config",
+		Filters: []wailsruntime.FileFilter{{DisplayName: "OpenVPN config", Pattern: "*.ovpn;*.conf"}},
+	})
+	if err != nil {
+		return nvpn.ImportResult{}, err
+	}
+	if path == "" {
+		return nvpn.ImportResult{}, errors.New("no file selected")
+	}
+	result, err := a.openvpn.ImportConfig(path)
+	if err != nil {
+		return nvpn.ImportResult{}, err
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return result, err
+	}
+	state.OpenVPNConfigName = result.ConfigName
+	if err := a.extensions.SaveNVPN(state); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// NvpnSetOpenvpnCredentials saves the OpenVPN/IKEv2 credentials. An empty
+// password keeps the previously saved one.
+func (a *App) NvpnSetOpenvpnCredentials(username, password string) error {
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return err
+	}
+	state.OpenVPNUsername = username
+	if password != "" {
+		state.OpenVPNPassword = password
+	}
+	return a.extensions.SaveNVPN(state)
+}
+
+// NvpnSetOpenvpnAutoConnect persists the "auto connect on start" flag for
+// OpenVPN mode.
+func (a *App) NvpnSetOpenvpnAutoConnect(autoConnect bool) error {
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return err
+	}
+	state.OpenVPNAutoConnect = autoConnect
+	return a.extensions.SaveNVPN(state)
+}
+
+// NvpnConnectOpenvpn connects the imported profile with the given credentials
+// (saving them for auto-connect) and restarts rickserve through the tunnel.
+func (a *App) NvpnConnectOpenvpn(username, password string) (nvpn.Status, error) {
+	if err := a.nvpn.Stop(); err != nil {
+		return nvpn.Status{}, err
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	state.OpenVPNUsername = username
+	if password != "" {
+		state.OpenVPNPassword = password
+	}
+	if err := a.extensions.SaveNVPN(state); err != nil {
+		return nvpn.Status{}, err
+	}
+	status, err := a.openvpn.Connect(username, password)
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	a.restartRickserve()
+	return status, nil
+}
+
+// NvpnStopOpenvpn disconnects the tunnel and restores direct traffic.
+func (a *App) NvpnStopOpenvpn() error {
+	if err := a.openvpn.Stop(); err != nil {
+		return err
+	}
+	a.restartRickserve()
+	return nil
+}
+
+// NvpnReconnectOpenvpn bounces the OpenVPN tunnel.
+func (a *App) NvpnReconnectOpenvpn() (nvpn.Status, error) {
+	if err := a.nvpn.Stop(); err != nil {
+		return nvpn.Status{}, err
+	}
+	state, err := a.extensions.NVPN()
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	status, err := a.openvpn.Connect(state.OpenVPNUsername, state.OpenVPNPassword)
+	if err != nil {
+		return nvpn.Status{}, err
+	}
+	a.restartRickserve()
+	return status, nil
+}
+
+// NvpnStatus returns the active tunnel state (SOCKS5 or OpenVPN).
+func (a *App) NvpnStatus() nvpn.Status {
+	if socks := a.nvpn.Status(); socks.Connected {
+		return socks
+	}
+	return a.openvpn.Status()
 }
 
 // PickFolder opens the native directory picker and returns the selected path,

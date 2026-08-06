@@ -70,3 +70,15 @@ func TestDecodeRickEventClassifiesRickserveEventNames(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeRickEventRecognizesAgentUpdateSpellings(t *testing.T) {
+	for _, name := range []string{"agent.updated", "AgentUpdate"} {
+		event, err := DecodeRickEvent([]byte(`{"type":"event","event":"`+name+`","data":{"swarm_id":"swarm-1","agents":[]}}`), 1)
+		if err != nil {
+			t.Fatalf("decode %q: %v", name, err)
+		}
+		if event.Kind != EventAgentUpdated {
+			t.Fatalf("decode %q kind = %q, want %q", name, event.Kind, EventAgentUpdated)
+		}
+	}
+}

@@ -28,10 +28,56 @@ describe('timeline normalization', () => {
     expect(visibleMessages(hydrated)[0].blocks[0].text).toBe('visible');
   });
 
+  it('restores canonical thinking and completed tools when a chat is revisited', () => {
+    const hydrated = hydrateMessages([
+      { role: 'user', blocks: [{ type: 'text', text: 'Inspect the project' }] },
+      { role: 'assistant', blocks: [
+        { type: 'thinking', text: 'I should read the entry point.' },
+        { type: 'tool_use', id: 'tool-1', name: 'read', input: { path: 'main.go' } },
+        { type: 'text', text: 'The entry point is clean.' },
+      ] },
+      { role: 'user', blocks: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'package main' }] },
+    ]);
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1].blocks.map(block => block.kind)).toEqual(['reasoning', 'tool', 'text']);
+    expect(hydrated[1].blocks[0].text).toContain('read the entry point');
+    expect(hydrated[1].blocks[1].tool).toMatchObject({
+      id: 'tool-1', name: 'read', status: 'completed', result: 'package main',
+    });
+  });
+
+  it('does not render persisted tool results as user prompts', () => {
+    const hydrated = hydrateMessages([
+      { role: 'user', blocks: [{ type: 'tool_result', tool_use_id: 'missing', content: 'result' }] },
+    ]);
+
+    expect(hydrated).toHaveLength(1);
+    expect(hydrated[0].role).toBe('assistant');
+    expect(hydrated[0].blocks[0].kind).toBe('tool');
+  });
+
   it('retains failed-run details', () => {
     const state = reduceRickEvent(initialTimelineState, event({ type: 'error', run_id: 'r', error: 'denied' }));
     expect(state.error).toBe('denied');
     expect(state.messages[0].blocks[0].error).toBe('denied');
+  });
+
+  it('finishes a run when the provider rejects the continuation after a tool result', () => {
+    let state = addUserMessage(initialTimelineState, 'hi', 'user-1');
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', run_id: 'r', data: { name: 'read', input: { path: 'a' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', data: { name: 'read', output: 'file contents' } }));
+    state = reduceRickEvent(state, event({ type: 'error', run_id: 'r', error: 'opencode-zen: http 503: the request is full' }));
+    // rickserve emits both the terminal agent event and the command response,
+    // followed by done. They must collapse into one terminal error.
+    state = reduceRickEvent(state, event({ type: 'error', run_id: 'r', error: 'opencode-zen: http 503: the request is full' }));
+    state = reduceRickEvent(state, event({ type: 'done', run_id: 'r' }));
+
+    expect(state.loading).toBe(false);
+    expect(state.error).toContain('503');
+    expect(state.messages[1].done).toBe(true);
+    expect(state.messages[1].blocks.some(block => block.kind === 'tool')).toBe(true);
+    expect(state.messages[1].blocks.filter(block => block.kind === 'error')).toHaveLength(1);
   });
 
   it('renders a standalone permission request so it can be answered', () => {
@@ -97,6 +143,66 @@ describe('timeline normalization', () => {
     expect(state.loading).toBe(false);
   });
 
+  it('keeps swarm worker websearch updates inside one swarm card', () => {
+    let state = reduceRickEvent(initialTimelineState, event({
+      type: 'event', event: 'ToolUse', kind: 'swarm.started', run_id: 'r',
+      data: { name: 'swarm', input: { name: 'research', agents: [{ name: 'early-life', role: 'research' }, { name: 'business', role: 'research' }] } },
+    }));
+    state = reduceRickEvent(state, event({
+      type: 'event', event: 'AgentUpdate', kind: 'agent.updated', run_id: 'r',
+      data: { agents: [{ id: 'business', name: 'business', status: 'working', current_tool: 'websearch', action: 'websearch completed' }] },
+    }));
+
+    expect(Object.values(state.swarms)).toHaveLength(1);
+    expect(state.messages[0].blocks.filter(block => block.kind === 'swarm')).toHaveLength(1);
+    expect(state.messages[0].blocks.some(block => block.kind === 'tool')).toBe(false);
+    expect(Object.values(state.swarms)[0].agents.find(agent => agent.id === 'business')?.action).toBe('websearch completed');
+  });
+
+  it('recognizes the legacy AgentUpdate transport spelling', () => {
+    let state = reduceRickEvent(initialTimelineState, event({
+      type: 'event', event: 'SwarmStart', kind: 'swarm.started', run_id: 'r',
+      data: { swarm_id: 'swarm-1', name: 'research', agents: [{ id: 'business', name: 'business' }] },
+    }));
+    state = reduceRickEvent(state, event({
+      type: 'event', event: 'AgentUpdate', kind: 'unknown', run_id: 'r',
+      data: { swarm_id: 'swarm-1', agents: [{ id: 'business', status: 'working', action: 'websearch completed' }] },
+    }));
+
+    expect(state.messages[0].blocks.filter(block => block.kind === 'swarm')).toHaveLength(1);
+    expect(Object.values(state.swarms)[0].agents[0].action).toBe('websearch completed');
+  });
+
+  it('routes agent updates by swarm identity when agent names are reused', () => {
+    let state = reduceRickEvent(initialTimelineState, event({
+      kind: 'swarm.started', run_id: 'r', data: { swarm_id: 'swarm-old', name: 'old', agents: [{ id: 'researcher' }] },
+    }));
+    state = reduceRickEvent(state, event({
+      kind: 'swarm.started', run_id: 'r', data: { swarm_id: 'swarm-new', name: 'new', agents: [{ id: 'researcher' }] },
+    }));
+    state = reduceRickEvent(state, event({
+      kind: 'agent.updated', run_id: 'r', data: { swarm_id: 'swarm-new', agents: [{ id: 'researcher', action: 'new swarm update' }] },
+    }));
+
+    expect(state.swarms['swarm-old'].agents[0].action).toBeUndefined();
+    expect(state.swarms['swarm-new'].agents[0].action).toBe('new swarm update');
+  });
+
+  it('migrates the optimistic swarm card to the runtime swarm identity', () => {
+    let state = reduceRickEvent(initialTimelineState, event({
+      type: 'event', event: 'ToolUse', kind: 'swarm.started', run_id: 'r',
+      data: { name: 'swarm', input: { name: 'research', agents: [{ name: 'business' }] } },
+    }));
+    state = reduceRickEvent(state, event({
+      type: 'event', event: 'SwarmStart', kind: 'swarm.started', run_id: 'r',
+      data: { swarm_id: 'swarm-runtime-1', name: 'research', agents: 1 },
+    }));
+
+    expect(Object.keys(state.swarms)).toEqual(['swarm-runtime-1']);
+    expect(state.messages[0].blocks.filter(block => block.kind === 'swarm')).toHaveLength(1);
+    expect(state.messages[0].blocks[0].swarm?.id).toBe('swarm-runtime-1');
+  });
+
   it('derives completion status from legacy tool result events', () => {
     const state = reduceRickEvent(initialTimelineState, event({
       type: 'event',
@@ -118,6 +224,27 @@ describe('timeline normalization', () => {
     expect(tools[0].status).toBe('running');
     expect(tools[1].status).toBe('completed');
     expect(tools[1].result).toBe('results');
+  });
+
+  it('preserves text-tool-text chronology instead of merging across a tool', () => {
+    let state = reduceRickEvent(initialTimelineState, event({ type: 'event', event: 'Content', run_id: 'r', data: { text: 'before' } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', run_id: 'r', data: { call_id: 'call-1', name: 'read', input: { path: 'a' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'Content', run_id: 'r', data: { text: 'after' } }));
+
+    expect(state.messages[0].blocks.map(block => block.kind)).toEqual(['text', 'tool', 'text']);
+    expect(state.messages[0].blocks[0].text).toBe('before');
+    expect(state.messages[0].blocks[2].text).toBe('after');
+  });
+
+  it('keeps sequential completed calls to the same tool distinct by call id', () => {
+    let state = reduceRickEvent(initialTimelineState, event({ type: 'event', event: 'ToolUse', run_id: 'r', data: { call_id: 'call-1', name: 'read', input: { path: 'a' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', data: { call_id: 'call-1', name: 'read', output: 'A' } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolUse', run_id: 'r', data: { call_id: 'call-2', name: 'read', input: { path: 'b' } } }));
+    state = reduceRickEvent(state, event({ type: 'event', event: 'ToolResult', run_id: 'r', data: { call_id: 'call-2', name: 'read', output: 'B' } }));
+
+    const tools = state.messages[0].blocks.filter(block => block.kind === 'tool').map(block => block.tool);
+    expect(tools).toHaveLength(2);
+    expect(tools.map(tool => [tool?.id, tool?.result])).toEqual([['call-1', 'A'], ['call-2', 'B']]);
   });
 
   it('accumulates per-call usage deltas into session totals', () => {

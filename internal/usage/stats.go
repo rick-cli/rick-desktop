@@ -26,27 +26,41 @@ func Add(target *Counters, value Counters) {
 	target.CacheWrite += value.CacheWrite
 }
 
-func ReadSession(dir, id string) (Counters, error) {
+type SessionStats struct {
+	Counters
+	ContextUsed int
+}
+
+func ReadSessionStats(dir, id string) (SessionStats, error) {
 	if strings.TrimSpace(id) == "" {
-		return Counters{}, nil
+		return SessionStats{}, nil
 	}
 	if strings.ContainsAny(id, `/\\`) || id == "." || id == ".." {
-		return Counters{}, errors.New("invalid session identifier")
+		return SessionStats{}, errors.New("invalid session identifier")
 	}
 	payload, err := os.ReadFile(filepath.Join(dir, id+".json"))
 	if errors.Is(err, os.ErrNotExist) {
-		return Counters{}, nil
+		return SessionStats{}, nil
 	}
 	if err != nil {
-		return Counters{}, fmt.Errorf("read session usage: %w", err)
+		return SessionStats{}, fmt.Errorf("read session usage: %w", err)
 	}
 	var value struct {
-		Usage Counters `json:"usage"`
+		Usage       Counters `json:"usage"`
+		ContextUsed int      `json:"context_used"`
 	}
 	if err := json.Unmarshal(payload, &value); err != nil {
-		return Counters{}, fmt.Errorf("decode session usage: %w", err)
+		return SessionStats{}, fmt.Errorf("decode session usage: %w", err)
 	}
-	return value.Usage, nil
+	if value.ContextUsed == 0 {
+		value.ContextUsed = value.Usage.Input + value.Usage.CacheRead + value.Usage.CacheWrite
+	}
+	return SessionStats{Counters: value.Usage, ContextUsed: value.ContextUsed}, nil
+}
+
+func ReadSession(dir, id string) (Counters, error) {
+	stats, err := ReadSessionStats(dir, id)
+	return stats.Counters, err
 }
 
 // ReadAggregate reads Rick's canonical usage.json. Rick keeps both daily and

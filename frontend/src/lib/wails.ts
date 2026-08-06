@@ -1,9 +1,27 @@
-import { AuthProvider, ChatMessage, CommandSpec, DailyUsage, DesktopConfig, Provider, ResolvedConfig, RickEvent, RickStatus, RunOptions, RuntimeInfo, Session, ToolInfo, UpdateInfo, UsageStats } from './types';
+import { AuthProvider, ChatMessage, CommandSpec, DailyUsage, DesktopConfig, Extension, NvpnSettings, NvpnStatus, OpenvpnImportResult, Provider, ResolvedConfig, RickEvent, RickStatus, RunOptions, RuntimeInfo, Session, TimelineState, ToolInfo, UpdateInfo, UsageStats } from './types';
 
 type WailsApp = Record<string, (...args: any[]) => Promise<any>>;
 
+const disconnectedStatus: NvpnStatus = {
+  connected: false, mode: '', server: '', country: '', city: '', socks_host: '', ip: '', proxy_url: '',
+};
+
 function app(): WailsApp | undefined {
   return window.go?.main?.App;
+}
+
+const timelinePersistenceQueues = new Map<string, Promise<void>>();
+let configPersistenceQueue = Promise.resolve();
+
+function queueTimelinePersistence(sessionId: string, operation: () => Promise<void>): Promise<void> {
+  const previous = timelinePersistenceQueues.get(sessionId) || Promise.resolve();
+  const task = previous.catch(() => {}).then(operation);
+  timelinePersistenceQueues.set(sessionId, task);
+  const cleanup = () => {
+    if (timelinePersistenceQueues.get(sessionId) === task) timelinePersistenceQueues.delete(sessionId);
+  };
+  task.then(cleanup, cleanup);
+  return task;
 }
 
 export async function getProviders(): Promise<Provider[]> {
@@ -24,6 +42,42 @@ export async function searchSessions(query: string): Promise<Session[]> {
 
 export async function getSessionMessages(sessionId: string): Promise<ChatMessage[]> {
   return (await app()?.GetSessionMessages(sessionId)) || [];
+}
+
+export async function saveDesktopTimeline(sessionId: string, timeline: TimelineState, session?: Session): Promise<void> {
+  const metadata = session ? { ...session, updated: new Date().toISOString() } : undefined;
+  const payload = JSON.stringify({ version: 1, session: metadata, timeline });
+  await queueTimelinePersistence(sessionId, async () => { await app()?.SaveDesktopTimeline(sessionId, payload); });
+}
+
+export interface LoadedDesktopTimeline {
+  timeline: TimelineState;
+  session?: Session;
+}
+
+export async function loadDesktopTimeline(sessionId: string): Promise<LoadedDesktopTimeline | null> {
+  await timelinePersistenceQueues.get(sessionId)?.catch(() => {});
+  const payload = await app()?.LoadDesktopTimeline(sessionId);
+  if (typeof payload !== 'string' || payload.trim() === '') return null;
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    const candidate = parsed && typeof parsed === 'object' && 'timeline' in parsed
+      ? (parsed as { timeline?: unknown }).timeline
+      : parsed;
+    if (!candidate || typeof candidate !== 'object') return null;
+    const timeline = candidate as Partial<TimelineState>;
+    if (!Array.isArray(timeline.messages) || typeof timeline.loading !== 'boolean' || !timeline.swarms || typeof timeline.swarms !== 'object') return null;
+    const session = parsed && typeof parsed === 'object' && 'session' in parsed
+      ? (parsed as { session?: Session }).session
+      : undefined;
+    return { timeline: timeline as TimelineState, session };
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteDesktopTimeline(sessionId: string): Promise<void> {
+  await queueTimelinePersistence(sessionId, async () => { await app()?.DeleteDesktopTimeline(sessionId); });
 }
 
 export async function renameSession(id: string, title: string): Promise<void> {
@@ -61,8 +115,8 @@ export async function runPrompt(prompt: string, model: string, sessionId?: strin
   return typeof value === 'string' ? value : '';
 }
 
-export async function stopRun(sessionId?: string): Promise<void> {
-  await app()?.StopRun(sessionId ?? '');
+export async function stopRun(sessionId?: string, runId?: string): Promise<void> {
+  await app()?.StopRun(sessionId ?? '', runId ?? '');
 }
 
 export async function respondPermission(requestId: string, decision: 'accept' | 'reject' | 'always'): Promise<void> {
@@ -154,7 +208,8 @@ export async function getConfig(): Promise<DesktopConfig> {
 }
 
 export async function updateConfig(config: DesktopConfig): Promise<void> {
-  await app()?.UpdateConfig(config);
+  configPersistenceQueue = configPersistenceQueue.catch(() => {}).then(async () => { await app()?.UpdateConfig(config); });
+  await configPersistenceQueue;
 }
 
 export async function exportSettings(): Promise<string> {
@@ -216,6 +271,77 @@ export async function pickFolder(): Promise<string> {
 
 export async function pickBackgroundFile(): Promise<string> {
   return (await app()?.PickBackgroundFile()) || '';
+}
+
+export async function getExtensions(): Promise<Extension[]> {
+  return (await app()?.GetExtensions()) || [];
+}
+
+export async function setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
+  await app()?.SetExtensionEnabled(id, enabled);
+}
+
+export async function addExtension(): Promise<Extension | null> {
+  return (await app()?.AddExtension()) || null;
+}
+
+export async function removeExtension(id: string): Promise<void> {
+  await app()?.RemoveExtension(id);
+}
+
+export async function nvpnGetSettings(): Promise<NvpnSettings> {
+  return (await app()?.NvpnGetSettings()) || {
+    username: '', has_password: false, auto_connect: false,
+    openvpn: { username: '', config_name: '', has_password: false, auto_connect: false },
+  };
+}
+
+export async function nvpnSetCredentials(username: string, password: string): Promise<void> {
+  await app()?.NvpnSetCredentials(username, password);
+}
+
+export async function nvpnSetAutoConnect(autoConnect: boolean): Promise<void> {
+  await app()?.NvpnSetAutoConnect(autoConnect);
+}
+
+export async function nvpnConnect(): Promise<NvpnStatus> {
+  return (await app()?.NvpnConnect()) || disconnectedStatus;
+}
+
+export async function nvpnStop(): Promise<void> {
+  await app()?.NvpnStop();
+}
+
+export async function nvpnReconnect(): Promise<NvpnStatus> {
+  return (await app()?.NvpnReconnect()) || disconnectedStatus;
+}
+
+export async function nvpnStatus(): Promise<NvpnStatus> {
+  return (await app()?.NvpnStatus()) || disconnectedStatus;
+}
+
+export async function nvpnImportOpenvpnConfig(): Promise<OpenvpnImportResult | null> {
+  return (await app()?.NvpnImportOpenvpnConfig()) || null;
+}
+
+export async function nvpnSetOpenvpnCredentials(username: string, password: string): Promise<void> {
+  await app()?.NvpnSetOpenvpnCredentials(username, password);
+}
+
+export async function nvpnSetOpenvpnAutoConnect(autoConnect: boolean): Promise<void> {
+  await app()?.NvpnSetOpenvpnAutoConnect(autoConnect);
+}
+
+export async function nvpnConnectOpenvpn(username: string, password: string): Promise<NvpnStatus> {
+  return (await app()?.NvpnConnectOpenvpn(username, password)) || disconnectedStatus;
+}
+
+export async function nvpnReconnectOpenvpn(): Promise<NvpnStatus> {
+  return (await app()?.NvpnReconnectOpenvpn()) || disconnectedStatus;
+}
+
+export async function nvpnStopOpenvpn(): Promise<void> {
+  await app()?.NvpnStopOpenvpn();
 }
 
 export function onRickEvent(callback: (event: RickEvent) => void): () => void {

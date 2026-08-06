@@ -7,13 +7,16 @@ import (
 )
 
 type ModelInfo struct {
-	Provider      string `json:"provider"`
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	ContextWindow int    `json:"context_window"`
-	Source        string `json:"source"`
-	Configured    bool   `json:"configured"`
-	Default       bool   `json:"default"`
+	Provider           string   `json:"provider"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	ContextWindow      int      `json:"context_window"`
+	Source             string   `json:"source"`
+	Configured         bool     `json:"configured"`
+	Default            bool     `json:"default"`
+	ReasoningEfforts   []string `json:"reasoning_efforts,omitempty"`
+	ReasoningDefault   string   `json:"reasoning_default,omitempty"`
+	ReasoningMandatory bool     `json:"reasoning_mandatory,omitempty"`
 }
 
 type modelsResponse struct {

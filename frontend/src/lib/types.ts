@@ -6,6 +6,9 @@ export interface Model {
   configured: boolean;
   is_default?: boolean;
   free?: boolean;
+  reasoning_efforts?: string[];
+  reasoning_default?: string;
+  reasoning_mandatory?: boolean;
 }
 
 export interface Provider {
@@ -196,15 +199,30 @@ export interface TimelineState {
   swarms: Record<string, SwarmActivity>;
 }
 
+export interface ChatContentBlock {
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'image' | string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown> | unknown;
+  tool_use_id?: string;
+  content?: string;
+  is_error?: boolean;
+  source?: string;
+  media_type?: string;
+}
+
 export interface ChatMessage {
-  id: string;
+  id?: string;
   role: 'user' | 'assistant' | 'system';
-  content: string;
+  content?: string;
+  blocks?: ChatContentBlock[];
   timestamp?: string;
   done?: boolean;
 }
 
 export interface RunOptions {
+  run_id?: string;
   max_turns?: number;
   permission_profile?: string;
   sandbox?: string;
@@ -287,13 +305,54 @@ export interface DesktopConfig {
   show_reasoning: boolean;
   reasoning_expanded: boolean;
   max_swarm_concurrency: number;
-  thinking_mode: 'auto' | 'off' | 'low' | 'medium' | 'high';
+  thinking_mode: 'auto' | 'off' | 'on' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   yolo: boolean;
   rickserve_path?: string;
   workspace_path?: string;
   background_mode?: 'theme' | 'image';
   background_path?: string;
   background_transparency?: number;
+}
+
+export interface Extension {
+  id: string;
+  name: string;
+  description: string;
+  version?: string;
+  built_in: boolean;
+  enabled: boolean;
+  source: string;
+}
+
+export interface NvpnOpenvpnSettings {
+  username: string;
+  config_name: string;
+  has_password: boolean;
+  auto_connect: boolean;
+}
+
+export interface NvpnSettings {
+  username: string;
+  has_password: boolean;
+  auto_connect: boolean;
+  openvpn: NvpnOpenvpnSettings;
+}
+
+export interface NvpnStatus {
+  connected: boolean;
+  mode: string;
+  server: string;
+  country: string;
+  city: string;
+  socks_host: string;
+  ip: string;
+  proxy_url: string;
+}
+
+export interface OpenvpnImportResult {
+  config_name: string;
+  server: string;
+  routes: number;
 }
 
 export interface AuthProvider {

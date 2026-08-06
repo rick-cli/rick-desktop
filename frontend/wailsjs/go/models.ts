@@ -105,6 +105,35 @@ export namespace domain {
 
 }
 
+export namespace extensions {
+	
+	export class Extension {
+	    id: string;
+	    name: string;
+	    description: string;
+	    version?: string;
+	    built_in: boolean;
+	    enabled: boolean;
+	    source: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Extension(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.version = source["version"];
+	        this.built_in = source["built_in"];
+	        this.enabled = source["enabled"];
+	        this.source = source["source"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
 	export class Attachment {
@@ -170,7 +199,8 @@ export namespace main {
 	export class ChatMessage {
 	    id: string;
 	    role: string;
-	    content: string;
+	    content?: string;
+	    blocks?: sessions.ContentBlock[];
 	    timestamp?: string;
 	    done: boolean;
 	
@@ -183,9 +213,28 @@ export namespace main {
 	        this.id = source["id"];
 	        this.role = source["role"];
 	        this.content = source["content"];
+	        this.blocks = this.convertValues(source["blocks"], sessions.ContentBlock);
 	        this.timestamp = source["timestamp"];
 	        this.done = source["done"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ModelUsage {
 	    model: string;
@@ -301,6 +350,9 @@ export namespace main {
 	    configured: boolean;
 	    is_default: boolean;
 	    free: boolean;
+	    reasoning_efforts?: string[];
+	    reasoning_default?: string;
+	    reasoning_mandatory?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Model(source);
@@ -315,6 +367,9 @@ export namespace main {
 	        this.configured = source["configured"];
 	        this.is_default = source["is_default"];
 	        this.free = source["free"];
+	        this.reasoning_efforts = source["reasoning_efforts"];
+	        this.reasoning_default = source["reasoning_default"];
+	        this.reasoning_mandatory = source["reasoning_mandatory"];
 	    }
 	}
 	
@@ -375,6 +430,7 @@ export namespace main {
 	    }
 	}
 	export class RunOptions {
+	    run_id?: string;
 	    max_turns?: number;
 	    permission_profile?: string;
 	    sandbox?: string;
@@ -390,6 +446,7 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.run_id = source["run_id"];
 	        this.max_turns = source["max_turns"];
 	        this.permission_profile = source["permission_profile"];
 	        this.sandbox = source["sandbox"];
@@ -576,6 +633,142 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace nvpn {
+	
+	export class ImportResult {
+	    config_name: string;
+	    server: string;
+	    routes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.config_name = source["config_name"];
+	        this.server = source["server"];
+	        this.routes = source["routes"];
+	    }
+	}
+	export class OpenVPNSettings {
+	    username: string;
+	    config_name: string;
+	    has_password: boolean;
+	    auto_connect: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new OpenVPNSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.username = source["username"];
+	        this.config_name = source["config_name"];
+	        this.has_password = source["has_password"];
+	        this.auto_connect = source["auto_connect"];
+	    }
+	}
+	export class Settings {
+	    username: string;
+	    has_password: boolean;
+	    auto_connect: boolean;
+	    openvpn: OpenVPNSettings;
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.username = source["username"];
+	        this.has_password = source["has_password"];
+	        this.auto_connect = source["auto_connect"];
+	        this.openvpn = this.convertValues(source["openvpn"], OpenVPNSettings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Status {
+	    connected: boolean;
+	    mode: string;
+	    server: string;
+	    country: string;
+	    city: string;
+	    socks_host: string;
+	    ip: string;
+	    proxy_url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Status(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.connected = source["connected"];
+	        this.mode = source["mode"];
+	        this.server = source["server"];
+	        this.country = source["country"];
+	        this.city = source["city"];
+	        this.socks_host = source["socks_host"];
+	        this.ip = source["ip"];
+	        this.proxy_url = source["proxy_url"];
+	    }
+	}
+
+}
+
+export namespace sessions {
+	
+	export class ContentBlock {
+	    type: string;
+	    text?: string;
+	    id?: string;
+	    name?: string;
+	    input?: any;
+	    tool_use_id?: string;
+	    content?: string;
+	    is_error?: boolean;
+	    source?: string;
+	    media_type?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContentBlock(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.text = source["text"];
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.input = source["input"];
+	        this.tool_use_id = source["tool_use_id"];
+	        this.content = source["content"];
+	        this.is_error = source["is_error"];
+	        this.source = source["source"];
+	        this.media_type = source["media_type"];
+	    }
 	}
 
 }

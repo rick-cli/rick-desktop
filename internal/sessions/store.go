@@ -39,8 +39,26 @@ type Summary struct {
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string         `json:"role"`
+	Content string         `json:"content,omitempty"`
+	Blocks  []ContentBlock `json:"blocks,omitempty"`
+}
+
+// ContentBlock mirrors rick's persisted provider blocks. Keeping the
+// structured form is required for Desktop history parity: flattening a
+// session to text discards thinking, tool calls, and tool results whenever a
+// user switches chats.
+type ContentBlock struct {
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Input     any    `json:"input,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	Source    string `json:"source,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
 }
 
 type storedSession struct {
@@ -126,7 +144,11 @@ func (s *Store) readMeta(filename string) (Summary, bool) {
 	if json.Unmarshal(raw, &meta) != nil || meta.ID == "" {
 		return Summary{}, false
 	}
-	return Summary{ID: meta.ID, Title: meta.Title, CWD: meta.CWD, Model: meta.Model, Messages: meta.Messages, Created: meta.Created, Updated: meta.Updated, Category: meta.Category, Favorite: meta.Favorite}, true
+	category := meta.Category
+	if category == "" {
+		category = dateCategory(meta.Created)
+	}
+	return Summary{ID: meta.ID, Title: meta.Title, CWD: meta.CWD, Model: meta.Model, Messages: meta.Messages, Created: meta.Created, Updated: meta.Updated, Category: category, Favorite: meta.Favorite}, true
 }
 
 // writeMeta refreshes the lightweight listing file after a desktop-side
@@ -245,7 +267,11 @@ func (s *Store) Messages(id string) ([]Message, error) {
 		if err := json.Unmarshal(raw, &value); err != nil {
 			continue
 		}
-		messages = append(messages, Message{Role: value.Role, Content: contentText(value.Content)})
+		messages = append(messages, Message{
+			Role:    value.Role,
+			Content: contentText(value.Content),
+			Blocks:  contentBlocks(value.Content),
+		})
 	}
 	return messages, nil
 }
@@ -318,7 +344,7 @@ func (s *Store) Delete(id string) error {
 		return errors.New("invalid session identifier")
 	}
 	path := filepath.Join(s.dir, id+".json")
-	if err := os.Remove(path); err != nil {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete session: %w", err)
 	}
 	_ = os.Remove(filepath.Join(s.dir, id+".meta.json"))
@@ -610,4 +636,19 @@ func contentText(raw json.RawMessage) string {
 		return builder.String()
 	}
 	return ""
+}
+
+func contentBlocks(raw json.RawMessage) []ContentBlock {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		if text == "" {
+			return nil
+		}
+		return []ContentBlock{{Type: "text", Text: text}}
+	}
+	var blocks []ContentBlock
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	return blocks
 }

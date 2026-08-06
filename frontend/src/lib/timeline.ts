@@ -1,4 +1,4 @@
-import { AttachmentBlock, EventKind, PermissionRequest, RickEvent, SwarmActivity, TimelineBlock, TimelineMessage, TimelineState, ToolActivity, Usage } from './types';
+import { AttachmentBlock, ChatContentBlock, ChatMessage, EventKind, PermissionRequest, RickEvent, SwarmActivity, TimelineBlock, TimelineMessage, TimelineState, ToolActivity, Usage } from './types';
 
 export const initialTimelineState: TimelineState = {
   messages: [],
@@ -52,14 +52,91 @@ export function addSystemMessage(state: TimelineState, text: string, id = `syste
   return { ...state, messages: [...state.messages, { id, role: 'system', blocks: [{ id: `${id}-status`, kind: 'status', text }], done: true }] };
 }
 
-export function hydrateMessages(messages: Array<{ id?: string; role?: string; content?: string; timestamp?: string; done?: boolean }>): TimelineMessage[] {
-  return messages.map<TimelineMessage>((message, index) => ({
-    id: message.id || `history-${index}`,
-    role: message.role === 'user' ? 'user' : message.role === 'system' ? 'system' : 'assistant',
-    blocks: message.content?.trim() ? [{ id: `history-${index}-text`, kind: 'text', text: message.content }] : [],
-    done: message.done ?? true,
-    timestamp: message.timestamp,
-  })).filter(isRenderableMessage);
+function canonicalBlocks(message: ChatMessage): ChatContentBlock[] {
+  if (message.blocks?.length) return message.blocks;
+  return message.content?.trim() ? [{ type: 'text', text: message.content }] : [];
+}
+
+function historyBlock(block: ChatContentBlock, messageIndex: number, blockIndex: number): TimelineBlock | undefined {
+  const id = `history-${messageIndex}-${blockIndex}`;
+  switch (block.type) {
+    case 'text':
+      return block.text?.trim() ? { id, kind: 'text', text: block.text } : undefined;
+    case 'thinking':
+      return block.text?.trim() ? { id, kind: 'reasoning', text: block.text, expanded: true } : undefined;
+    case 'tool_use':
+      return {
+        id,
+        kind: 'tool',
+        tool: {
+          id: block.id || id,
+          name: block.name || 'tool',
+          status: 'running',
+          arguments: block.input,
+        },
+      };
+    case 'image':
+      return { id, kind: 'attachment', attachment: { name: 'Image', media_type: block.media_type } };
+    default:
+      return undefined;
+  }
+}
+
+function finishHistoryTool(messages: TimelineMessage[], block: ChatContentBlock, fallbackID: string): void {
+  const toolUseID = block.tool_use_id || '';
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+    const target = messages[messageIndex].blocks.find(candidate => candidate.kind === 'tool' && candidate.tool?.id === toolUseID);
+    if (!target?.tool) continue;
+    target.tool = {
+      ...target.tool,
+      status: block.is_error ? 'failed' : 'completed',
+      result: block.is_error ? undefined : block.content,
+      error: block.is_error ? block.content : undefined,
+    };
+    return;
+  }
+  messages.push({
+    id: `${fallbackID}-message`,
+    role: 'assistant',
+    blocks: [{
+      id: fallbackID,
+      kind: 'tool',
+      tool: {
+        id: toolUseID || fallbackID,
+        name: 'tool',
+        status: block.is_error ? 'failed' : 'completed',
+        result: block.is_error ? undefined : block.content,
+        error: block.is_error ? block.content : undefined,
+      },
+    }],
+    done: true,
+  });
+}
+
+// Rebuild the complete TUI-like transcript from rick's canonical provider
+// messages. Tool-result user turns are folded back into their tool cards rather
+// than rendered as fake user prompts.
+export function hydrateMessages(messages: ChatMessage[]): TimelineMessage[] {
+  const hydrated: TimelineMessage[] = [];
+  messages.forEach((message, messageIndex) => {
+    const canonical = canonicalBlocks(message);
+    const results = canonical.filter(block => block.type === 'tool_result');
+    results.forEach((block, blockIndex) => finishHistoryTool(hydrated, block, `history-${messageIndex}-result-${blockIndex}`));
+
+    const blocks = canonical
+      .filter(block => block.type !== 'tool_result')
+      .map((block, blockIndex) => historyBlock(block, messageIndex, blockIndex))
+      .filter((block): block is TimelineBlock => Boolean(block));
+    if (blocks.length === 0) return;
+    hydrated.push({
+      id: message.id || `history-${messageIndex}`,
+      role: message.role === 'user' ? 'user' : message.role === 'system' ? 'system' : 'assistant',
+      blocks,
+      done: message.done ?? true,
+      timestamp: message.timestamp,
+    });
+  });
+  return hydrated.filter(isRenderableMessage);
 }
 
 export function reduceRickEvent(state: TimelineState, event: RickEvent): TimelineState {
@@ -94,7 +171,7 @@ export function reduceRickEvent(state: TimelineState, event: RickEvent): Timelin
     case 'run.cancelled':
       return finishAssistant({ ...next, error: undefined }, runId, true);
     case 'run.failed':
-      return finishAssistant(next, runId, false, event.error || eventText(event) || 'Rick reported an error');
+      return reduceFailedRun(next, runId, event);
     default:
       return captureUnknownEvent(next, runId, event);
   }
@@ -109,9 +186,10 @@ function appendAssistantText(state: TimelineState, runId: string | undefined, me
     messages.push({ id, role: 'assistant', runId, blocks: [{ id: `${id}-${kind}`, kind, text, expanded: kind === 'reasoning' }], done: false });
   } else {
     const message = { ...messages[index], blocks: [...messages[index].blocks], done: false };
-    const blockIndex = message.blocks.findIndex(block => block.kind === kind);
-    if (blockIndex < 0) {
-      message.blocks.push({ id: `${message.id}-${kind}`, kind, text, expanded: kind === 'reasoning' });
+    const blockIndex = message.blocks.length - 1;
+    const lastBlock = message.blocks[blockIndex];
+    if (!lastBlock || lastBlock.kind !== kind) {
+      message.blocks.push({ id: `${message.id}-${kind}-${message.blocks.length}`, kind, text, expanded: kind === 'reasoning' });
     } else {
       message.blocks[blockIndex] = { ...message.blocks[blockIndex], text: `${message.blocks[blockIndex].text || ''}${text}` };
     }
@@ -127,16 +205,17 @@ function updateTool(state: TimelineState, runId: string | undefined, event: Rick
   const messages = [...state.messages];
   const messageId = index >= 0 ? messages[index].id : event.message_id || `assistant-${runId || 'current'}`;
   const message = index >= 0 ? { ...messages[index], blocks: [...messages[index].blocks] } : { id: messageId, role: 'assistant' as const, runId, blocks: [], done: false };
-  let blockIndex = message.blocks.findIndex(block => block.kind === 'tool' && block.tool?.id === tool.id && block.tool?.name === tool.name);
-  // The daemon emits ToolUse and ToolResult without a shared id, so match by
-  // name instead: a completion lands on the most recent running card, and a
-  // new call reuses the most recent completed card of the same tool. This
-  // keeps repeated tool calls from stacking duplicate cards.
-  if (blockIndex < 0) {
-    const matchStatus = tool.status === 'completed' || tool.status === 'failed' ? 'running' : 'completed';
+  const nested = asObject(data.tool || data.call || data);
+  const hasExplicitId = Boolean(nested.id || nested.tool_id || nested.call_id);
+  let blockIndex = hasExplicitId
+    ? message.blocks.findIndex(block => block.kind === 'tool' && block.tool?.id === tool.id)
+    : -1;
+  // Legacy daemon results have no call id, so pair them with the latest
+  // running card by name. Every new invocation remains a distinct card.
+  if (blockIndex < 0 && (tool.status === 'completed' || tool.status === 'failed')) {
     for (let i = message.blocks.length - 1; i >= 0; i -= 1) {
       const block = message.blocks[i];
-      if (block.kind === 'tool' && block.tool?.name === tool.name && block.tool?.status === matchStatus) {
+      if (block.kind === 'tool' && block.tool?.name === tool.name && block.tool?.status === 'running') {
         blockIndex = i;
         break;
       }
@@ -152,9 +231,11 @@ function updateTool(state: TimelineState, runId: string | undefined, event: Rick
 
 function updateSwarm(state: TimelineState, runId: string | undefined, event: RickEvent, kind: EventKind): TimelineState {
   const data = asObject(event.data);
+  const nested = asObject(data.swarm || data.team || data);
+  const hasExplicitID = Boolean(nested.id || nested.swarm_id || event.swarm_id);
   const swarm = normalizeSwarm(data, event, kind);
-  const previous = resolveSwarm(state.swarms, swarm);
-  const id = previous?.id || swarm.id;
+  const previous = resolveSwarm(state.swarms, swarm, hasExplicitID, kind);
+  const id = hasExplicitID ? swarm.id : previous?.id || swarm.id;
   const merged: SwarmActivity = {
     ...(previous || { id, agents: [] }),
     ...swarm,
@@ -165,12 +246,14 @@ function updateSwarm(state: TimelineState, runId: string | undefined, event: Ric
     error: swarm.error || previous?.error,
     agents: mergeAgents(previous?.agents || [], swarm.agents || []),
   };
-  const swarms = { ...state.swarms, [merged.id]: merged };
+  const swarms = { ...state.swarms };
+  if (previous && previous.id !== merged.id) delete swarms[previous.id];
+  swarms[merged.id] = merged;
   const index = findAssistant(state.messages, runId, event.message_id);
   const messages = [...state.messages];
   const messageId = index >= 0 ? messages[index].id : event.message_id || `assistant-${runId || 'current'}`;
   const message = index >= 0 ? { ...messages[index], blocks: [...messages[index].blocks] } : { id: messageId, role: 'assistant' as const, runId, blocks: [], done: false };
-  const blockIndex = message.blocks.findIndex(block => block.kind === 'swarm' && block.swarm?.id === merged.id);
+  const blockIndex = message.blocks.findIndex(block => block.kind === 'swarm' && (block.swarm?.id === merged.id || block.swarm?.id === previous?.id));
   if (blockIndex >= 0) message.blocks[blockIndex] = { ...message.blocks[blockIndex], swarm: merged };
   else message.blocks.push({ id: `${message.id}-swarm-${merged.id}`, kind: 'swarm', swarm: merged });
   if (index < 0) messages.push(message); else messages[index] = message;
@@ -180,18 +263,32 @@ function updateSwarm(state: TimelineState, runId: string | undefined, event: Ric
 // resolveSwarm finds the swarm record an event belongs to. Team tool events
 // only carry an agent id (task_id / "completed <agent>"), so match those by
 // agent before falling back to the most recently created swarm.
-function resolveSwarm(swarms: Record<string, SwarmActivity>, candidate: SwarmActivity): SwarmActivity | undefined {
+function resolveSwarm(
+  swarms: Record<string, SwarmActivity>,
+  candidate: SwarmActivity,
+  hasExplicitID: boolean,
+  kind: EventKind,
+): SwarmActivity | undefined {
   if (candidate.id && swarms[candidate.id]) return swarms[candidate.id];
+  const existing = Object.values(swarms);
+  if (hasExplicitID) {
+    if (kind !== 'swarm.started' || !candidate.title) return undefined;
+    for (let index = existing.length - 1; index >= 0; index -= 1) {
+      if (existing[index].title === candidate.title) return existing[index];
+    }
+    return undefined;
+  }
   if (candidate.title) {
-    const byTitle = Object.values(swarms).find(swarm => swarm.title === candidate.title);
-    if (byTitle) return byTitle;
+    for (let index = existing.length - 1; index >= 0; index -= 1) {
+      if (existing[index].title === candidate.title) return existing[index];
+    }
   }
   for (const agent of candidate.agents) {
-    const byAgent = Object.values(swarms).find(swarm => swarm.agents.some(existing => existing.id === agent.id));
-    if (byAgent) return byAgent;
+    for (let index = existing.length - 1; index >= 0; index -= 1) {
+      if (existing[index].agents.some(current => current.id === agent.id)) return existing[index];
+    }
   }
-  const recent = Object.values(swarms);
-  return recent[recent.length - 1];
+  return existing[existing.length - 1];
 }
 
 function updatePermission(state: TimelineState, runId: string | undefined, event: RickEvent): TimelineState {
@@ -241,11 +338,39 @@ export function pendingApprovals(messages: TimelineMessage[]): PermissionRequest
 function finishAssistant(state: TimelineState, runId: string | undefined, cancelled: boolean, error?: string): TimelineState {
   const messages = state.messages.map(message => message.runId === runId || (!runId && message.role === 'assistant' && !message.done) ? ({ ...message, done: true }) : message);
   if (error) {
-    const target = messages.findIndex(message => message.role === 'assistant' && !message.blocks.some(block => block.kind === 'error'));
-    if (target >= 0) messages[target] = { ...messages[target], blocks: [...messages[target].blocks, { id: `${messages[target].id}-error`, kind: 'error', error }] };
-    else messages.push({ id: `assistant-${runId || 'error'}`, role: 'assistant', runId, blocks: [{ id: `assistant-${runId || 'error'}-error`, kind: 'error', error }], done: true });
+    let target = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'assistant' && (!runId || messages[index].runId === runId)) {
+        target = index;
+        break;
+      }
+    }
+    if (target >= 0) {
+      const duplicate = messages[target].blocks.some(block => block.kind === 'error' && block.error === error);
+      if (!duplicate) {
+        messages[target] = { ...messages[target], blocks: [...messages[target].blocks, { id: `${messages[target].id}-error`, kind: 'error', error }] };
+      }
+    } else {
+      messages.push({ id: `assistant-${runId || 'error'}`, role: 'assistant', runId, blocks: [{ id: `assistant-${runId || 'error'}-error`, kind: 'error', error }], done: true });
+    }
   }
   return { ...state, messages, loading: false, activeRunId: undefined, error: cancelled ? undefined : error || state.error };
+}
+
+function humanizeProviderHalt(error: string): string | undefined {
+  const lower = error.toLowerCase();
+  if (lower.includes('reasoning_content') && /http.{0,4}400/.test(lower)) {
+    return "Stopped: this provider rejected the saved reasoning state required to continue after a tool call. Start a fresh task or switch provider.";
+  }
+  if (lower.includes('request is full') || (lower.includes('503') && lower.includes('full'))) {
+    return 'Provider at capacity (503 “the request is full”). Retry later or switch model/provider.';
+  }
+  return undefined;
+}
+
+function reduceFailedRun(state: TimelineState, runId: string | undefined, event: RickEvent): TimelineState {
+  const message = event.error || eventText(event) || 'Rick reported an error';
+  return finishAssistant(state, runId, false, humanizeProviderHalt(message) || message);
 }
 
 // captureUnknownEvent surfaces protocol events the reducer does not yet know
@@ -285,6 +410,7 @@ function normalizeKind(event: RickEvent): EventKind {
   if (event.type === 'done') return 'run.completed';
   if (event.type === 'cancelled') return 'run.cancelled';
   if (event.type === 'error') return 'run.failed';
+  if (name === 'agentupdate' || name.startsWith('agent.')) return 'agent.updated';
   if (name === 'content' || name === 'text' || name === 'delta') return 'text.delta';
   if (name.includes('reason') || name.includes('think')) return 'reasoning.delta';
   if (name.includes('tool')) {
@@ -323,7 +449,7 @@ function normalizeTool(data: Record<string, unknown>, event: RickEvent, kind: Ev
   };
   const status = nested.status || statusByKind[kind] || 'running';
   return {
-    id: String(nested.id || nested.tool_id || event.message_id || `tool-${event.sequence || Date.now()}`),
+    id: String(nested.id || nested.tool_id || nested.call_id || event.message_id || `tool-${event.sequence || Date.now()}`),
     name: String(nested.name || nested.tool || 'Tool'),
     status: String(status),
     arguments: nested.arguments || nested.args || nested.input,

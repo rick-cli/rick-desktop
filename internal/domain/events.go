@@ -177,7 +177,7 @@ func classifyEvent(envelopeType, name, errorText, toolName string) EventKind {
 		return EventToolFailed
 	case "swarm.started", "team.started", "swarmstart", "swarm.start", "swarm":
 		return EventSwarmStarted
-	case "agent.updated", "agent.started", "agent.completed", "agent.result":
+	case "agent.updated", "agent.started", "agent.completed", "agent.result", "agentupdate":
 		return EventAgentUpdated
 	case "swarm.completed", "team.completed", "swarm.finished", "swarm.complete":
 		return EventSwarmCompleted

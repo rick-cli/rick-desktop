@@ -29,6 +29,39 @@ func TestCountersTotalIncludesCachedTokens(t *testing.T) {
 	}
 }
 
+func TestReadSessionStatsLoadsPersistedContext(t *testing.T) {
+	dir := t.TempDir()
+	payload := `{"usage":{"input":30,"output":8,"cache_read":50,"cache_write":2},"context_used":82}`
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := ReadSessionStats(dir, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Counters != (Counters{Input: 30, Output: 8, CacheRead: 50, CacheWrite: 2}) {
+		t.Fatalf("unexpected counters: %+v", stats.Counters)
+	}
+	if stats.ContextUsed != 82 {
+		t.Fatalf("context used = %d, want 82", stats.ContextUsed)
+	}
+}
+
+func TestReadSessionStatsEstimatesLegacyContextFromLastStoredUsage(t *testing.T) {
+	dir := t.TempDir()
+	payload := `{"usage":{"input":30,"output":8,"cache_read":50,"cache_write":2}}`
+	if err := os.WriteFile(filepath.Join(dir, "legacy.json"), []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := ReadSessionStats(dir, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ContextUsed != 82 {
+		t.Fatalf("legacy context estimate = %d, want 82", stats.ContextUsed)
+	}
+}
+
 func TestResolveContextWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	payload := `{"provider":{"openai":{"context_windows":{"gpt-5":128000}}}}`

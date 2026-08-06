@@ -144,9 +144,9 @@ func Validate(config domain.AppConfig) []string {
 		problems = append(problems, "sandbox must be read-only, workspace-write, trusted, or off")
 	}
 	switch config.ThinkingMode {
-	case "auto", "off", "low", "medium", "high":
+	case "auto", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max":
 	default:
-		problems = append(problems, "thinking_mode must be auto, off, low, medium, or high")
+		problems = append(problems, "thinking_mode must be auto, off, on, minimal, low, medium, high, xhigh, or max")
 	}
 	if config.MaxSwarmConcurrency < 1 || config.MaxSwarmConcurrency > 32 {
 		problems = append(problems, "max_swarm_concurrency must be between 1 and 32")

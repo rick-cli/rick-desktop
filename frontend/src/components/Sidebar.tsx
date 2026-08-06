@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowUpFromLine, ChevronDown, ChevronRight, CircleUserRound, Copy, Cpu, FileText, FolderInput, FolderTree, MessageSquare, Pencil, Search, Settings2, Star, Trash2 } from 'lucide-react';
+import { ArrowUpFromLine, ChevronDown, ChevronLeft, ChevronRight, CircleUserRound, Copy, Cpu, FileText, FolderInput, FolderTree, MessageSquare, Pencil, Search, Settings2, Star, Trash2 } from 'lucide-react';
 import { BrowserOpenURL } from '../../wailsjs/runtime/runtime';
 import { Session } from '../lib/types';
 
@@ -13,6 +13,7 @@ interface SidebarProps {
   onSelectSession: (session: Session) => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
+  onCollapse: () => void;
   onRenameSession: (session: Session, title: string) => void;
   onSetCategory: (session: Session, category: string) => void;
   onSetFavorite: (session: Session, fav: boolean) => void;
@@ -28,7 +29,7 @@ function categoryKey(session: Session): string {
   return session.category || 'Older';
 }
 
-export function Sidebar({ sessions, selectedSession, runningSessions, contextFiles, workspacePath, onPickFolder, onSelectSession, onNewChat, onOpenSettings, onRenameSession, onSetCategory, onSetFavorite, onDeleteSession, onForkSession, onExportSession }: SidebarProps) {
+export function Sidebar({ sessions, selectedSession, runningSessions, contextFiles, workspacePath, onPickFolder, onSelectSession, onNewChat, onOpenSettings, onCollapse, onRenameSession, onSetCategory, onSetFavorite, onDeleteSession, onForkSession, onExportSession }: SidebarProps) {
   const [query, setQuery] = useState('');
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [actionFor, setActionFor] = useState<Session | null>(null);
@@ -147,6 +148,7 @@ export function Sidebar({ sessions, selectedSession, runningSessions, contextFil
     <div className="brand">
       <span className="wordmark">Rick</span>
       <span className="version">v0.1</span>
+      <button type="button" onClick={onCollapse} className="sidebar-collapse" aria-label="Hide sidebar" title="Hide sidebar"><ChevronLeft size={15} /></button>
     </div>
 
     <div className="newTaskWrap">

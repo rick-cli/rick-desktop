@@ -74,6 +74,7 @@ type ErrorSink func(error)
 
 type Service struct {
 	path    string
+	env     []string
 	onEvent EventSink
 	onError ErrorSink
 
@@ -81,6 +82,14 @@ type Service struct {
 	command  *exec.Cmd
 	stdin    io.WriteCloser
 	stopping bool
+}
+
+// SetEnv sets the environment for the rickserve process (merged with the
+// parent's environment by the caller). Set before Start.
+func (s *Service) SetEnv(env []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.env = env
 }
 
 func NewService(path string, onEvent EventSink, onError ErrorSink) *Service {
@@ -98,6 +107,9 @@ func (s *Service) Start() error {
 	}
 
 	command := newCommand(s.path)
+	if len(s.env) > 0 {
+		command.Env = s.env
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("open rickserve stdin: %w", err)
@@ -179,11 +191,14 @@ func (s *Service) Running() bool {
 	return s.command != nil
 }
 
-func OneShot(ctx context.Context, path string, request any) ([]json.RawMessage, error) {
+func OneShot(ctx context.Context, path string, request any, env ...[]string) ([]json.RawMessage, error) {
 	if strings.TrimSpace(path) == "" {
 		path = "rickserve"
 	}
 	command := newContextCommand(ctx, path)
+	if len(env) > 0 {
+		command.Env = env[0]
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open rickserve stdin: %w", err)
