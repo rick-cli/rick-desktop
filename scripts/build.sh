@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.1.2}"
 PLATFORM="$(go env GOOS)-$(go env GOARCH)"
 OUT_NAME="RickDesktop-v${VERSION}-${PLATFORM}"
 [ "$(go env GOOS)" = "windows" ] && OUT_NAME="${OUT_NAME}.exe"
