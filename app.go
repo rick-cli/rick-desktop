@@ -68,6 +68,11 @@ func (c *cachedValue[T]) set(value T) {
 	c.expires = time.Now().Add(30 * time.Second)
 }
 
+// invalidate expires the cached value immediately so the next read re-fetches.
+func (c *cachedValue[T]) invalidate() {
+	c.expires = time.Time{}
+}
+
 type oneShotCacheEntry struct {
 	data    json.RawMessage
 	expires time.Time
@@ -686,6 +691,7 @@ func (a *App) GetAuthStatus() ([]AuthProvider, error) {
 // SaveProvider writes an API key / base URL for a provider into Rick's
 // auth.json and returns the refreshed provider list.
 func (a *App) SaveProvider(provider, apiKey, baseURL, label string) ([]AuthProvider, error) {
+	a.providersCache.invalidate() // the model list may change after adding a provider
 	return a.getAuthRows(map[string]any{
 		"type": "auth", "action": "save",
 		"provider": provider, "api_key": apiKey,
@@ -718,12 +724,14 @@ func (a *App) UpdateProvider(provider string, onlyFree, disabled *bool, keyMode,
 	if defaultModel != "" {
 		request["default_model"] = defaultModel
 	}
+	a.providersCache.invalidate() // the model list may change (only_free/base_url)
 	return a.getAuthRows(request)
 }
 
 // AddProviderKeys appends one or more API keys to a provider and returns the
 // refreshed provider list.
 func (a *App) AddProviderKeys(provider string, keys []string) ([]AuthProvider, error) {
+	a.providersCache.invalidate()
 	return a.getAuthRows(map[string]any{
 		"type": "auth", "action": "add_keys",
 		"provider": provider, "api_keys": keys,
@@ -733,6 +741,7 @@ func (a *App) AddProviderKeys(provider string, keys []string) ([]AuthProvider, e
 // RemoveProviderKey removes the key at the 1-based position and returns the
 // refreshed provider list.
 func (a *App) RemoveProviderKey(provider string, keyIndex int) ([]AuthProvider, error) {
+	a.providersCache.invalidate()
 	return a.getAuthRows(map[string]any{
 		"type": "auth", "action": "remove_key",
 		"provider": provider, "key_index": keyIndex,
@@ -742,6 +751,7 @@ func (a *App) RemoveProviderKey(provider string, keyIndex int) ([]AuthProvider, 
 // RemoveProvider deletes a provider credential from Rick's auth.json and
 // returns the refreshed provider list.
 func (a *App) RemoveProvider(provider string) ([]AuthProvider, error) {
+	a.providersCache.invalidate()
 	return a.getAuthRows(map[string]any{"type": "auth", "action": "remove", "provider": provider})
 }
 
